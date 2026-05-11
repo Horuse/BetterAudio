@@ -1,8 +1,10 @@
 import type { Node as XyNode, Edge as XyEdge } from '@xyflow/svelte';
-import type { NodeKind } from '$lib/domain/audio-node';
-import type { PipelineEdge, PipelineNode } from '$lib/domain/audio-node';
+import type {
+	NodeKind,
+	PipelineEdge,
+	PipelineNode
+} from '$lib/modules/pipeline/types';
 
-// Domain → xyflow.
 export function toXyNodes(nodes: PipelineNode[]): XyNode[] {
 	return nodes.map((n) => ({
 		id: n.id,
@@ -16,7 +18,6 @@ export function toXyEdges(edges: PipelineEdge[]): XyEdge[] {
 	return edges.map((e) => ({ id: e.id, source: e.source, target: e.target }));
 }
 
-// xyflow → domain (strip UI-only fields like measured/selected/dragging).
 export function fromXyNodes(xyNodes: XyNode[]): PipelineNode[] {
 	return xyNodes.map((n) => ({
 		id: n.id,

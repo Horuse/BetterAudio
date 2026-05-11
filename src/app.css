@@ -5,7 +5,7 @@
 @theme {
     --color-theme: black;
     --color-background: oklch(0.99 0 0);
-    --color-primary: oklch(79.5% 0.184 86.047);
+    --color-primary: var(--color-blue-500);
 
     --color-contrast: oklch(0 0 0); /* куди йде шкала */
 
@@ -28,7 +28,6 @@
 .dark {
     --color-theme: white;
     --color-background: oklch(0.28 0 0);
-    --color-primary: oklch(79.5% 0.184 86.047);
 
     --color-contrast: oklch(1 0 0);
 }
@@ -89,4 +88,16 @@
     .input-base {
         @apply focus:outline-none px-2.5 bg-neutral-100 hover:bg-neutral-200 hover:text-theme transition-all text-neutral-800 rounded-lg h-6.5 flex justify-center items-center;
     }
+}
+
+.svelte-flow {
+    --xy-node-border-default: none !important;
+    --xy-node-border-selected-default: none !important;
+
+    --xy-edge-stroke-default: var(--color-primary) !important;
+    --xy-edge-stroke-width-default: 4 !important;
+}
+
+.handle {
+    @apply !size-2 border-0 rounded-full !border-neutral-500 !bg-neutral-200 ring-[1px] !ring-neutral-500
 }

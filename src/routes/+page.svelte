@@ -1,21 +1,19 @@
 <script lang="ts">
     import { goto } from '$app/navigation';
     import { createId } from '@paralleldrive/cuid2';
-    import { emptyPipeline } from '$lib/domain/pipeline';
-    import { useAppStore } from '$lib/stores/app-store.svelte';
-
-    const store = useAppStore();
+    import { methods as pipelineMethods } from '$lib/modules/pipeline/methods';
+    import { pipelineStore } from '$lib/modules/pipeline/stores.svelte';
 
     async function createPipeline() {
         const id = createId();
-        const p = emptyPipeline(id, `Pipeline ${store.pipelines.length + 1}`);
-        await store.savePipeline(p);
+        const p = pipelineMethods.emptyPipeline(id, `Pipeline ${pipelineStore.pipelines.length + 1}`);
+        await pipelineStore.save(p);
         await goto(`/pipelines/${id}`);
     }
 
     async function remove(id: string, event: Event) {
         event.stopPropagation();
-        await store.deletePipeline(id);
+        await pipelineStore.remove(id);
     }
 
     function formatDate(ts: number): string {
@@ -39,11 +37,11 @@
         </button>
     </div>
 
-    {#if store.pipelines.length === 0}
+    {#if pipelineStore.pipelines.length === 0}
         <p class="text-sm text-theme">No pipelines yet. Create one to get started.</p>
     {:else}
         <ul class="flex flex-col gap-4">
-            {#each store.pipelines as p (p.id)}
+            {#each pipelineStore.pipelines as p (p.id)}
                 <li class="flex items-center bg-neutral-200 hover:bg-neutral-300 transition-colors p-4 rounded-2xl">
                     <a href={`/pipelines/${p.id}`} class="flex-1">
                         <div class="font-medium">{p.name}</div>

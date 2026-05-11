@@ -1,7 +1,13 @@
 <script lang="ts">
-	import { themeStore } from '$lib/stores/theme.ts';
+	import type { Snippet } from 'svelte';
+	import { themeStore } from '$lib/modules/theme/stores';
 
-	let { left, right } = $props();
+	interface Props {
+		left?: Snippet;
+		right?: Snippet;
+	}
+
+	let { left, right }: Props = $props();
 </script>
 
 <header

@@ -1,13 +1,11 @@
 <script lang="ts">
 	import { page } from '$app/state';
-	import { SvelteFlowProvider } from '@xyflow/svelte';
-	import type { Pipeline } from '$lib/domain/pipeline';
-	import { useAppStore } from '$lib/stores/app-store.svelte';
-	import FlowEditor from '$lib/components/FlowEditor.svelte';
-	import NodeSidebar from '$lib/components/NodeSidebar.svelte';
-	import ActivationButton from '$lib/components/ActivationButton.svelte';
-
-	const store = useAppStore();
+	import type { Pipeline } from '$lib/modules/pipeline/types';
+	import { methods as pipelineMethods } from '$lib/modules/pipeline/methods';
+	import { audioStore } from '$lib/modules/audio/stores.svelte';
+	import { ActivationButton } from '$lib/modules/audio/ui';
+	import Header from '$lib/components/layout/header.svelte';
+	import Flow from '$lib/modules/flow';
 
 	let pipeline = $state<Pipeline | null>(null);
 	let notFound = $state(false);
@@ -19,7 +17,7 @@
 			return;
 		}
 		(async () => {
-			const p = await store.repo.get(id);
+			const p = await pipelineMethods.get(id);
 			if (!p) {
 				notFound = true;
 			} else {
@@ -27,24 +25,22 @@
 			}
 		})();
 	});
-
-	import Header from '$lib/components/layout/header.svelte';
 </script>
 
 <Header>
 	{#snippet left()}
 		<div class="flex items-center gap-3">
-			<a href="/" class="text-sm button-header px-4">← Back</a>
+			<a href="/" class="button-header px-4 text-sm">← Back</a>
 			{#if pipeline}
-				<input value={pipeline.name} class="input-base">
+				<input value={pipeline.name} class="input-base" />
 			{/if}
 		</div>
 	{/snippet}
 
 	{#snippet right()}
 		<div class="flex items-center gap-3">
-			{#if store.lastError}
-				<span class="text-xs text-red-600">{store.lastError}</span>
+			{#if audioStore.lastError}
+				<span class="text-xs text-red-600">{audioStore.lastError}</span>
 			{/if}
 			{#if pipeline}
 				<ActivationButton />
@@ -57,12 +53,7 @@
 	{#if notFound}
 		<div class="p-8 text-sm text-gray-500">Pipeline not found.</div>
 	{:else if pipeline}
-		<SvelteFlowProvider>
-			<div class="flex flex-1 overflow-hidden">
-				<FlowEditor {pipeline} />
-				<NodeSidebar />
-			</div>
-		</SvelteFlowProvider>
+		<Flow.ui.Flow {pipeline} />
 	{:else}
 		<div class="p-8 text-sm text-gray-500">Loading…</div>
 	{/if}
