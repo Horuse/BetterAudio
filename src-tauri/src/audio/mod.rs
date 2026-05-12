@@ -1,3 +1,14 @@
 pub mod device;
+pub mod effects;
 pub mod engine;
+pub mod format;
 pub mod graph;
+#[cfg(target_os = "macos")]
+pub mod macos_hal;
+pub mod pipeline;
+pub mod recorder;
+pub mod resample;
+#[cfg(target_os = "macos")]
+pub mod sck_capture;
+pub mod streams;
+pub mod system_audio;

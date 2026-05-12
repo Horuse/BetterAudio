@@ -1,7 +1,7 @@
 <script lang="ts">
 	import type { NodeKind } from '$lib/modules/pipeline/types';
 	import { pipelineStore } from '$lib/modules/pipeline/stores.svelte';
-	import { DND_MIME, kinds, registry } from '../utils/nodes';
+	import { DND_MIME, categoryLabel, categoryOrder, kindsByCategory, registry } from '../utils/nodes';
 
 	function onDragStart(event: DragEvent, kind: NodeKind) {
 		if (!event.dataTransfer) return;
@@ -14,27 +14,38 @@
 	}
 </script>
 
-<aside class="flex w-64 shrink-0 flex-col gap-3 border-l border-neutral-200 bg-background p-4 dark:border-neutral-800">
-	<h2 class="text-xs font-semibold tracking-wide text-neutral-800 uppercase dark:text-neutral-200">
-		Nodes
-	</h2>
-	<ul class="flex flex-col gap-2">
-		{#each kinds as kind (kind)}
-			<li
-				draggable="true"
-				ondragstart={(e) => onDragStart(e, kind)}
-				class="flex items-center justify-between rounded-xl bg-neutral-100 p-3 dark:bg-neutral-800"
-			>
-				<span>{registry[kind].label}</span>
-				<button
-					class="rounded px-2 py-0.5 text-xs text-neutral-800 hover:bg-neutral-200 dark:text-neutral-200 dark:hover:bg-neutral-700"
-					onclick={() => onClickAdd(kind)}
-					aria-label={`Add ${registry[kind].label}`}
-				>
-					+
-				</button>
-			</li>
-		{/each}
-	</ul>
-	<p class="mt-3 text-xs text-neutral-500">Click + to add, or drag onto canvas</p>
+<aside
+	class="flex w-72 shrink-0 flex-col gap-5 overflow-y-auto border-l border-neutral-200 bg-background p-4 dark:border-neutral-800"
+>
+	{#each categoryOrder as category (category)}
+		<section class="flex flex-col gap-2">
+			<h2 class="text-[10px] font-semibold tracking-wider text-neutral-1000 uppercase">
+				{categoryLabel[category]}
+			</h2>
+			<ul class="flex flex-col gap-1.5">
+				{#each kindsByCategory[category] as kind (kind)}
+					{@const node = registry[kind]}
+					<li
+						draggable="true"
+						ondragstart={(e) => onDragStart(e, kind)}
+						class="group flex items-start justify-between gap-2 rounded-lg bg-neutral-100 px-3 py-2 hover:bg-neutral-200"
+					>
+						<div class="flex min-w-0 flex-col">
+							<span class="text-sm font-medium text-theme">{node.label}</span>
+							<span class="text-[11px] leading-tight text-neutral-900">{node.description}</span>
+						</div>
+						<button
+							class="shrink-0 rounded px-2 py-0.5 text-sm text-neutral-1000 hover:bg-neutral-300"
+							onclick={() => onClickAdd(kind)}
+							aria-label={`Add ${node.label}`}
+						>
+							+
+						</button>
+					</li>
+				{/each}
+			</ul>
+		</section>
+	{/each}
+
+	<p class="mt-auto text-[10px] text-neutral-900">Click + to add, or drag onto canvas.</p>
 </aside>

@@ -1,12 +1,19 @@
 import { invoke } from '@tauri-apps/api/core';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
-import type { AudioDevice, AudioStateEvent, StartPipelinePayload } from './types';
+import type {
+	AudioApplication,
+	AudioDevice,
+	AudioStateEvent,
+	StartPipelinePayload
+} from './types';
 
 const AUDIO_STATE_EVENT = 'audio://state';
 
 export const methods = {
 	listInputDevices: (): Promise<AudioDevice[]> => invoke<AudioDevice[]>('list_input_devices'),
 	listOutputDevices: (): Promise<AudioDevice[]> => invoke<AudioDevice[]>('list_output_devices'),
+	listAudioApplications: (): Promise<AudioApplication[]> =>
+		invoke<AudioApplication[]>('list_audio_applications'),
 	startPipeline: (graph: StartPipelinePayload): Promise<void> =>
 		invoke('start_pipeline', { graph }),
 	stopPipeline: (): Promise<void> => invoke('stop_pipeline'),

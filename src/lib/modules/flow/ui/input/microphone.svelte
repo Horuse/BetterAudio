@@ -1,11 +1,11 @@
 <script lang="ts">
-	import { Handle, Position, useSvelteFlow, type Node, type NodeProps } from '@xyflow/svelte';
-	import type { InputNodeData } from '$lib/modules/pipeline/types';
+	import { useSvelteFlow, type Node, type NodeProps } from '@xyflow/svelte';
+	import type { MicrophoneNodeData } from '$lib/modules/pipeline/types';
 	import { audioStore } from '$lib/modules/audio/stores.svelte';
 	import Wrapper from '../node.svelte';
 
-	type InputNodeType = Node<InputNodeData, 'input'>;
-	let { id, data }: NodeProps<InputNodeType> = $props();
+	type MicrophoneNodeType = Node<MicrophoneNodeData, 'microphone'>;
+	let { id, data }: NodeProps<MicrophoneNodeType> = $props();
 
 	const flow = useSvelteFlow();
 
@@ -15,9 +15,9 @@
 	}
 </script>
 
-<Wrapper label="Input">
+<Wrapper label="Microphone" accent="input" hasOutput>
 	<select
-		class="w-full rounded border px-2 py-1 text-sm"
+		class="nodrag nopan w-full rounded border border-neutral-400 bg-neutral-100 px-2 py-1 text-sm text-neutral-1100"
 		value={data.deviceId ?? ''}
 		onchange={onChange}
 	>
@@ -26,5 +26,4 @@
 			<option value={device.id}>{device.name}</option>
 		{/each}
 	</select>
-	<Handle type="source" class="handle" position={Position.Right} />
 </Wrapper>

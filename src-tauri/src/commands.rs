@@ -6,6 +6,7 @@ use tauri::{AppHandle, Emitter, State};
 use crate::audio::device::{self, DeviceInfo};
 use crate::audio::engine::Command;
 use crate::audio::graph::GraphSpec;
+use crate::audio::system_audio::{self, AudioApplication};
 use crate::error::{AppError, AppResult};
 use crate::state::AppState;
 
@@ -19,6 +20,11 @@ pub fn list_input_devices() -> AppResult<Vec<DeviceInfo>> {
 #[tauri::command]
 pub fn list_output_devices() -> AppResult<Vec<DeviceInfo>> {
     device::list_outputs()
+}
+
+#[tauri::command]
+pub fn list_audio_applications() -> AppResult<Vec<AudioApplication>> {
+    system_audio::list_audio_applications()
 }
 
 #[tauri::command]

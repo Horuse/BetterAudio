@@ -4,6 +4,7 @@ import type {
 	PipelineEdge,
 	PipelineNode
 } from '$lib/modules/pipeline/types';
+import { registry } from './nodes';
 
 export function toXyNodes(nodes: PipelineNode[]): XyNode[] {
 	return nodes.map((n) => ({
@@ -19,12 +20,18 @@ export function toXyEdges(edges: PipelineEdge[]): XyEdge[] {
 }
 
 export function fromXyNodes(xyNodes: XyNode[]): PipelineNode[] {
-	return xyNodes.map((n) => ({
-		id: n.id,
-		kind: (n.type ?? 'input') as NodeKind,
-		position: { x: n.position.x, y: n.position.y },
-		data: { ...(n.data as Record<string, unknown>) } as PipelineNode['data']
-	}));
+	return xyNodes.flatMap((n) => {
+		const kind = n.type as NodeKind | undefined;
+		if (!kind || !(kind in registry)) return [];
+		return [
+			{
+				id: n.id,
+				kind,
+				position: { x: n.position.x, y: n.position.y },
+				data: { ...(n.data as Record<string, unknown>) } as PipelineNode['data']
+			}
+		];
+	});
 }
 
 export function fromXyEdges(xyEdges: XyEdge[]): PipelineEdge[] {

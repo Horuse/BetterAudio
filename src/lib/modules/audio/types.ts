@@ -8,6 +8,11 @@ export interface AudioDevice {
 	kind: DeviceKind;
 }
 
+export interface AudioApplication {
+	bundleId: string;
+	name: string;
+}
+
 export type AudioStateEvent =
 	| { kind: 'started' }
 	| { kind: 'stopped' }

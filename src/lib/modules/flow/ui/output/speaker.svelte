@@ -1,11 +1,11 @@
 <script lang="ts">
-	import { Handle, Position, useSvelteFlow, type Node, type NodeProps } from '@xyflow/svelte';
-	import type { OutputNodeData } from '$lib/modules/pipeline/types';
+	import { useSvelteFlow, type Node, type NodeProps } from '@xyflow/svelte';
+	import type { SpeakerNodeData } from '$lib/modules/pipeline/types';
 	import { audioStore } from '$lib/modules/audio/stores.svelte';
 	import Wrapper from '../node.svelte';
 
-	type OutputNodeType = Node<OutputNodeData, 'output'>;
-	let { id, data }: NodeProps<OutputNodeType> = $props();
+	type SpeakerNodeType = Node<SpeakerNodeData, 'speaker'>;
+	let { id, data }: NodeProps<SpeakerNodeType> = $props();
 
 	const flow = useSvelteFlow();
 
@@ -15,16 +15,15 @@
 	}
 </script>
 
-<Wrapper label="Output">
+<Wrapper label="Speaker" accent="output" hasInput>
 	<select
-		class="w-full rounded border px-2 py-1 text-sm"
+		class="nodrag nopan w-full rounded border border-neutral-400 bg-neutral-100 px-2 py-1 text-sm text-neutral-1100"
 		value={data.deviceId ?? ''}
 		onchange={onChange}
 	>
-		<option value="">— Select speaker —</option>
+		<option value="">— Select output —</option>
 		{#each audioStore.outputDevices as device (device.id)}
 			<option value={device.id}>{device.name}</option>
 		{/each}
 	</select>
-	<Handle type="target" class="handle" position={Position.Left} />
 </Wrapper>

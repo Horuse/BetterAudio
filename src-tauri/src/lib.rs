@@ -18,10 +18,12 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_store::Builder::default().build())
+        .plugin(tauri_plugin_dialog::init())
         .manage(AppState::spawn())
         .invoke_handler(tauri::generate_handler![
             commands::list_input_devices,
             commands::list_output_devices,
+            commands::list_audio_applications,
             commands::start_pipeline,
             commands::stop_pipeline,
         ])

@@ -1,7 +1,12 @@
+use std::collections::HashSet;
+
 use cpal::traits::{DeviceTrait, HostTrait};
 use serde::Serialize;
 
 use crate::error::{AppError, AppResult};
+
+#[cfg(target_os = "macos")]
+use crate::audio::macos_hal;
 
 /// Direction of an audio device endpoint.
 #[derive(Debug, Clone, Copy, Serialize)]
@@ -12,9 +17,6 @@ pub enum DeviceKind {
 }
 
 /// Lightweight DTO sent to the frontend.
-///
-/// `id` is the device name from cpal — on macOS device names are stable and unique
-/// enough for a demo. For production we'd use a stronger identifier per platform.
 #[derive(Debug, Clone, Serialize)]
 pub struct DeviceInfo {
     pub id: String,
@@ -22,25 +24,44 @@ pub struct DeviceInfo {
     pub kind: DeviceKind,
 }
 
-/// Enumerate input devices on the default host (CoreAudio on macOS).
 pub fn list_inputs() -> AppResult<Vec<DeviceInfo>> {
-    let host = cpal::default_host();
-    let devices = host
-        .input_devices()
-        .map_err(|e| AppError::Host(e.to_string()))?;
-    Ok(collect(devices, DeviceKind::Input))
+    #[cfg(target_os = "macos")]
+    {
+        return Ok(unique_named(
+            macos_hal::list_input_devices().into_iter().map(|d| d.name).collect(),
+            DeviceKind::Input,
+        ));
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let host = cpal::default_host();
+        let devices = host
+            .input_devices()
+            .map_err(|e| AppError::Host(e.to_string()))?;
+        Ok(collect_cpal(devices, DeviceKind::Input))
+    }
 }
 
-/// Enumerate output devices on the default host.
 pub fn list_outputs() -> AppResult<Vec<DeviceInfo>> {
-    let host = cpal::default_host();
-    let devices = host
-        .output_devices()
-        .map_err(|e| AppError::Host(e.to_string()))?;
-    Ok(collect(devices, DeviceKind::Output))
+    #[cfg(target_os = "macos")]
+    {
+        return Ok(unique_named(
+            macos_hal::list_output_devices().into_iter().map(|d| d.name).collect(),
+            DeviceKind::Output,
+        ));
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let host = cpal::default_host();
+        let devices = host
+            .output_devices()
+            .map_err(|e| AppError::Host(e.to_string()))?;
+        Ok(collect_cpal(devices, DeviceKind::Output))
+    }
 }
 
-fn collect<I: Iterator<Item = cpal::Device>>(devices: I, kind: DeviceKind) -> Vec<DeviceInfo> {
+#[cfg(not(target_os = "macos"))]
+fn collect_cpal<I: Iterator<Item = cpal::Device>>(devices: I, kind: DeviceKind) -> Vec<DeviceInfo> {
     devices
         .filter_map(|d| {
             let name = d.name().ok()?;
@@ -53,21 +74,33 @@ fn collect<I: Iterator<Item = cpal::Device>>(devices: I, kind: DeviceKind) -> Ve
         .collect()
 }
 
-/// Find a device by id (name) on the given side.
-#[allow(dead_code)] // wired in by the engine in a later step
-pub fn find(kind: DeviceKind, id: &str) -> AppResult<cpal::Device> {
+fn unique_named(names: Vec<String>, kind: DeviceKind) -> Vec<DeviceInfo> {
+    let mut seen = HashSet::new();
+    names
+        .into_iter()
+        .filter(|n| seen.insert(n.clone()))
+        .map(|name| DeviceInfo {
+            id: name.clone(),
+            name,
+            kind,
+        })
+        .collect()
+}
+
+/// Find a cpal device by name. We match purely on name — the cpal `Device` is
+/// only used to build the stream (AUHAL on macOS), which doesn't need to know
+/// or query the device's "current" config. Native sample rate and channel
+/// count are resolved separately via the HAL layer on macOS.
+///
+/// We use `host.devices()` (every AudioDeviceID) rather than `output_devices()`
+/// / `input_devices()` because those filter through cpal's active-format probe,
+/// which silently drops non-default routes (e.g. internal speakers while
+/// headphones are connected).
+pub fn find(_kind: DeviceKind, id: &str) -> AppResult<cpal::Device> {
     let host = cpal::default_host();
-    let mut iter: Box<dyn Iterator<Item = cpal::Device>> = match kind {
-        DeviceKind::Input => Box::new(
-            host.input_devices()
-                .map_err(|e| AppError::Host(e.to_string()))?,
-        ),
-        DeviceKind::Output => Box::new(
-            host.output_devices()
-                .map_err(|e| AppError::Host(e.to_string()))?,
-        ),
-    };
-    iter.find(|d| d.name().map(|n| n == id).unwrap_or(false))
+    host.devices()
+        .map_err(|e| AppError::Host(e.to_string()))?
+        .find(|d| d.name().map(|n| n == id).unwrap_or(false))
         .ok_or_else(|| AppError::Device(format!("device not found: {id}")))
 }
 
@@ -78,7 +111,6 @@ mod tests {
     #[test]
     fn enumerates_inputs_without_panicking() {
         let inputs = list_inputs().expect("inputs");
-        // CI runners may have zero devices — only assert that the call returns Ok.
         println!("found {} input device(s):", inputs.len());
         for d in &inputs {
             println!("  - {}", d.name);
