@@ -117,14 +117,7 @@ extern "C" fn sample_trampoline(
         return;
     };
     for prod in producers.iter_mut() {
-        for &sample in slice {
-            if prod.push(sample).is_err() {
-                // Ring full — consumer hasn't drained yet. Drop the rest of
-                // this block for this subscriber; the engine catches up next
-                // callback.
-                break;
-            }
-        }
+        crate::audio::streams::bulk_push(prod, slice);
     }
 }
 

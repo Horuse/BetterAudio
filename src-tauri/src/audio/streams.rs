@@ -16,6 +16,33 @@ use rtrb::Producer;
 use crate::audio::format::{convert_to_stereo, write_stereo_to_output};
 use crate::error::{AppError, AppResult};
 
+/// Bulk-push a slice into an SPSC ring with a single `write_chunk` reservation
+/// instead of per-sample atomic-CAS via `push`. ~10–50× cheaper on the RT
+/// thread. On overflow only the head fits — the tail is silently dropped (the
+/// consumer is falling behind, glitches are inevitable; staying RT-safe is
+/// what matters).
+pub fn bulk_push(prod: &mut Producer<f32>, samples: &[f32]) {
+    let want = samples.len();
+    if want == 0 {
+        return;
+    }
+    let avail = prod.slots();
+    let to_write = want.min(avail);
+    if to_write == 0 {
+        return;
+    }
+    if let Ok(mut chunk) = prod.write_chunk(to_write) {
+        let (first, second) = chunk.as_mut_slices();
+        let n1 = first.len();
+        first.copy_from_slice(&samples[..n1]);
+        let n2 = second.len();
+        if n2 > 0 {
+            second.copy_from_slice(&samples[n1..n1 + n2]);
+        }
+        chunk.commit_all();
+    }
+}
+
 /// Build an input stream that broadcasts converted-to-stereo f32 frames to all
 /// given producer rings. The stream is **not** started — call `.play()` after.
 pub fn build_input_stream(
@@ -70,14 +97,7 @@ where
                 }
                 convert_to_stereo::<T>(data, &mut staging[..needed], src_channels);
                 for prod in &mut producers {
-                    for &s in &staging[..needed] {
-                        // Drop on overflow rather than block — the consumer is
-                        // catching up. Drop is preferable to glitching the RT
-                        // input thread.
-                        if prod.push(s).is_err() {
-                            break;
-                        }
-                    }
+                    bulk_push(prod, &staging[..needed]);
                 }
             },
             err_cb,

@@ -39,6 +39,17 @@ impl WavRecorder {
         Ok(())
     }
 
+    /// Force any buffered bytes to disk. Called periodically so a hard crash
+    /// loses at most one flush interval of audio. Note: hound only updates the
+    /// RIFF header on `finalize`, so a crash still leaves a file with an
+    /// outdated `data` chunk size — `ffmpeg -i broken.wav fixed.wav` rebuilds
+    /// it. The actual PCM bytes are intact.
+    pub fn flush(&mut self) -> AppResult<()> {
+        self.writer
+            .flush()
+            .map_err(|e| AppError::Stream(format!("flush wav: {e}")))
+    }
+
     pub fn finalize(self) -> AppResult<()> {
         self.writer
             .finalize()

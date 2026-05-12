@@ -20,6 +20,30 @@ pub trait Effect: Send {
     fn process(&mut self, samples: &mut [f32], frames: usize);
 }
 
+/// Enum dispatch wrapper so the RT thread doesn't pay a vtable indirection per
+/// process call. The closed set of effects is known at compile time; LLVM can
+/// inline the inner loop for each variant.
+pub enum RuntimeEffect {
+    Gain(GainEffect),
+    Mute(MuteEffect),
+    ChannelBalance(ChannelBalanceEffect),
+    Limiter(LimiterEffect),
+    LevelMeter(LevelMeterEffect),
+}
+
+impl RuntimeEffect {
+    #[inline]
+    pub fn process(&mut self, samples: &mut [f32], frames: usize) {
+        match self {
+            RuntimeEffect::Gain(e) => e.process(samples, frames),
+            RuntimeEffect::Mute(e) => e.process(samples, frames),
+            RuntimeEffect::ChannelBalance(e) => e.process(samples, frames),
+            RuntimeEffect::Limiter(e) => e.process(samples, frames),
+            RuntimeEffect::LevelMeter(e) => e.process(samples, frames),
+        }
+    }
+}
+
 /// UI-side handle to one effect's runtime parameters. Holds the same `Arc`s
 /// as the audio-thread effect instance, so writes here are visible to the
 /// audio callback on the next block.
@@ -336,11 +360,11 @@ impl Effect for LimiterEffect {
 pub fn build_chain(
     spec: &EffectChain,
 ) -> (
-    Vec<Box<dyn Effect>>,
+    Vec<RuntimeEffect>,
     Vec<(String, EffectControl)>,
     Vec<MeterHandle>,
 ) {
-    let mut effects: Vec<Box<dyn Effect>> = Vec::with_capacity(spec.0.len());
+    let mut effects: Vec<RuntimeEffect> = Vec::with_capacity(spec.0.len());
     let mut controls: Vec<(String, EffectControl)> = Vec::new();
     let mut meters: Vec<MeterHandle> = Vec::new();
 
@@ -348,27 +372,27 @@ pub fn build_chain(
         match inst.spec {
             EffectSpec::Gain(d) => {
                 let (e, c) = GainEffect::new(d);
-                effects.push(Box::new(e));
+                effects.push(RuntimeEffect::Gain(e));
                 controls.push((inst.node_id.clone(), c));
             }
             EffectSpec::Mute(d) => {
                 let (e, c) = MuteEffect::new(d);
-                effects.push(Box::new(e));
+                effects.push(RuntimeEffect::Mute(e));
                 controls.push((inst.node_id.clone(), c));
             }
             EffectSpec::ChannelBalance(d) => {
                 let (e, c) = ChannelBalanceEffect::new(d);
-                effects.push(Box::new(e));
+                effects.push(RuntimeEffect::ChannelBalance(e));
                 controls.push((inst.node_id.clone(), c));
             }
             EffectSpec::Limiter(d) => {
                 let (e, c) = LimiterEffect::new(d);
-                effects.push(Box::new(e));
+                effects.push(RuntimeEffect::Limiter(e));
                 controls.push((inst.node_id.clone(), c));
             }
             EffectSpec::LevelMeter(d) => {
                 let (e, handle) = LevelMeterEffect::new(d, inst.node_id.clone());
-                effects.push(Box::new(e));
+                effects.push(RuntimeEffect::LevelMeter(e));
                 meters.push(handle);
             }
         }

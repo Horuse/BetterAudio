@@ -24,7 +24,7 @@ use tauri::{AppHandle, Emitter};
 use tracing::{info, warn};
 
 use crate::audio::device::{self, DeviceKind};
-use crate::audio::effects::{build_chain, Effect, EffectControl, MeterHandle};
+use crate::audio::effects::{build_chain, EffectControl, MeterHandle, RuntimeEffect};
 use crate::audio::graph::{
     EffectChain, InputSpec, OutputSpec, ValidGraph, ValidInput, ValidOutput,
 };
@@ -44,8 +44,10 @@ const RING_CAPACITY: usize = 24_000;
 /// Block size used by the resampler. 256 frames @ 48 kHz ≈ 5.3 ms.
 const RESAMPLE_CHUNK: usize = 256;
 
-/// File recording sample rate. Fixed at 48 kHz for stereo lossless WAV.
-const RECORDER_SR: u32 = 48_000;
+/// Fallback sample rate for the file recorder when no input is connected to
+/// it. With at least one input the recorder uses the highest connected input
+/// rate to avoid lossy downsampling.
+const RECORDER_DEFAULT_SR: u32 = 48_000;
 
 /// File recorder worker loop pacing.
 const RECORDER_POLL: Duration = Duration::from_millis(5);
@@ -117,6 +119,60 @@ impl Drop for RecorderWorker {
     }
 }
 
+/// Fixed-capacity ring buffer used as the output-side staging FIFO. Unlike
+/// `VecDeque`, this guarantees zero allocations after construction — the RT
+/// output callback path cannot trigger a realloc no matter how transients
+/// stack up. Overrun is a debug-only panic.
+struct StagingRing {
+    buf: Box<[f32]>,
+    head: usize,
+    tail: usize,
+    len: usize,
+}
+
+impl StagingRing {
+    fn with_capacity(capacity: usize) -> Self {
+        Self {
+            buf: vec![0.0_f32; capacity].into_boxed_slice(),
+            head: 0,
+            tail: 0,
+            len: 0,
+        }
+    }
+
+    #[inline]
+    fn len(&self) -> usize {
+        self.len
+    }
+
+    #[inline]
+    fn pop(&mut self) -> Option<f32> {
+        if self.len == 0 {
+            return None;
+        }
+        let v = self.buf[self.head];
+        self.head = (self.head + 1) % self.buf.len();
+        self.len -= 1;
+        Some(v)
+    }
+
+    fn extend_from_slice(&mut self, src: &[f32]) {
+        debug_assert!(
+            self.len + src.len() <= self.buf.len(),
+            "StagingRing overrun: have {} + {} new > cap {}",
+            self.len,
+            src.len(),
+            self.buf.len()
+        );
+        let cap = self.buf.len();
+        for &v in src {
+            self.buf[self.tail] = v;
+            self.tail = if self.tail + 1 == cap { 0 } else { self.tail + 1 };
+        }
+        self.len += src.len();
+    }
+}
+
 /// Per (input, output) bridge state on the consumer side.
 struct BridgeConsumer {
     consumer: Consumer<f32>,
@@ -124,11 +180,10 @@ struct BridgeConsumer {
     resampler: Option<StereoResampler>,
     /// Holds incoming samples (input SR) until we have a full resampler chunk.
     input_staging: Vec<f32>,
-    /// Holds resampled-then-effected stereo samples (output SR) waiting to be
-    /// mixed into the device or file block. FIFO queue, no allocations on push
-    /// because we reserve capacity up front.
-    output_staging: std::collections::VecDeque<f32>,
-    effects: Vec<Box<dyn Effect>>,
+    /// Resampled-then-effected stereo samples (output SR) waiting to be mixed
+    /// into the device or file block. Allocation-free in RT.
+    output_staging: StagingRing,
+    effects: Vec<RuntimeEffect>,
     /// Scratch buffer for resampler output / pass-through chunks. Reused.
     chunk_tmp: Vec<f32>,
 }
@@ -147,12 +202,18 @@ impl BridgeConsumer {
         };
         let out_max = resampler.as_ref().map(|r| r.out_max()).unwrap_or(RESAMPLE_CHUNK);
         let (chain, controls, meters) = build_chain(effects);
+        // out_max is per-chunk frames; one chunk produces `out_max * 2`
+        // interleaved samples. `* 4` headroom covers (a) one full produced
+        // chunk waiting before drain, (b) a second one pushed before the
+        // consumer wakes, and (c) odd interleave alignment. With out_max ~512
+        // (worst-case 96→48k ratio) this is ~16 KB — cheap for the safety.
+        let staging_capacity = out_max * 4;
         Ok((
             Self {
                 consumer,
                 resampler,
                 input_staging: Vec::with_capacity(RESAMPLE_CHUNK * 2 + 8),
-                output_staging: std::collections::VecDeque::with_capacity(out_max * 4),
+                output_staging: StagingRing::with_capacity(staging_capacity),
                 effects: chain,
                 chunk_tmp: Vec::with_capacity(out_max * 2),
             },
@@ -168,8 +229,8 @@ impl BridgeConsumer {
         if self.output_staging.len() < 2 {
             self.try_refill_one_chunk();
         }
-        let l = self.output_staging.pop_front().unwrap_or(0.0);
-        let r = self.output_staging.pop_front().unwrap_or(0.0);
+        let l = self.output_staging.pop().unwrap_or(0.0);
+        let r = self.output_staging.pop().unwrap_or(0.0);
         [l, r]
     }
 
@@ -210,7 +271,7 @@ impl BridgeConsumer {
         for eff in &mut self.effects {
             eff.process(&mut self.chunk_tmp, frames);
         }
-        self.output_staging.extend(self.chunk_tmp.iter().copied());
+        self.output_staging.extend_from_slice(&self.chunk_tmp);
     }
 }
 
@@ -234,13 +295,26 @@ pub fn build(graph: &ValidGraph, app: AppHandle) -> AppResult<ActivePipeline> {
         input_runtime.insert(inp.id.clone(), resolved);
     }
 
-    // 2. Resolve every output device + its native config.
+    // 2. Resolve every output device + its native config. File recorders pick
+    //    their write SR from the connected inputs — using the *highest* input
+    //    rate avoids unnecessary downsampling, so the WAV preserves the best
+    //    quality the source can offer.
     let mut output_runtime: HashMap<String, ResolvedOutput> = HashMap::new();
     for out in &graph.outputs {
         if !graph.bridges.iter().any(|b| b.output_id == out.id) {
             continue;
         }
-        let resolved = resolve_output(out)?;
+        let file_sr_hint: Option<u32> = if matches!(&out.spec, OutputSpec::FileRecording { .. }) {
+            graph
+                .bridges
+                .iter()
+                .filter(|b| b.output_id == out.id)
+                .filter_map(|b| input_native_sr.get(&b.input_id).copied())
+                .max()
+        } else {
+            None
+        };
+        let resolved = resolve_output(out, file_sr_hint)?;
         output_runtime.insert(out.id.clone(), resolved);
     }
 
@@ -296,8 +370,8 @@ pub fn build(graph: &ValidGraph, app: AppHandle) -> AppResult<ActivePipeline> {
             ResolvedOutput::Speaker(spec) => {
                 speaker_streams.push(start_speaker_stream(spec, consumers, &app)?);
             }
-            ResolvedOutput::File { path, .. } => {
-                workers.push(start_recorder_worker(path, consumers)?);
+            ResolvedOutput::File { path, sample_rate } => {
+                workers.push(start_recorder_worker(path, sample_rate, consumers)?);
             }
         }
     }
@@ -372,11 +446,11 @@ fn resolve_input(inp: &ValidInput) -> AppResult<ResolvedInput> {
         InputSpec::SystemAudio {
             exclude_current_app,
         } => Ok(ResolvedInput::SystemAudio {
-            sample_rate: RECORDER_SR,
+            sample_rate: SCK_SR,
             exclude_current_app: *exclude_current_app,
         }),
         InputSpec::AppAudio { bundle_id } => Ok(ResolvedInput::AppAudio {
-            sample_rate: RECORDER_SR,
+            sample_rate: SCK_SR,
             bundle_id: bundle_id.clone(),
         }),
     }
@@ -456,6 +530,10 @@ fn start_input_stream(
 
 /// ScreenCaptureKit always delivers interleaved stereo by configuration.
 const SCK_CHANNELS: usize = 2;
+/// ScreenCaptureKit sample rate request. 48 kHz is macOS's universal audio
+/// rate and matches AVAudioSession / CoreAudio's preferred output, so no
+/// resampling happens on the SCK delivery side.
+const SCK_SR: u32 = 48_000;
 
 // ---------- output resolution ----------
 
@@ -484,7 +562,7 @@ impl ResolvedOutput {
     }
 }
 
-fn resolve_output(out: &ValidOutput) -> AppResult<ResolvedOutput> {
+fn resolve_output(out: &ValidOutput, file_sr_hint: Option<u32>) -> AppResult<ResolvedOutput> {
     match &out.spec {
         OutputSpec::Speaker { device_id } => {
             let device = device::find(DeviceKind::Output, device_id)?;
@@ -499,7 +577,10 @@ fn resolve_output(out: &ValidOutput) -> AppResult<ResolvedOutput> {
         }
         OutputSpec::FileRecording { file_path } => Ok(ResolvedOutput::File {
             path: PathBuf::from(file_path),
-            sample_rate: RECORDER_SR,
+            // Prefer the highest source rate so the WAV never carries a
+            // downsampled signal. Fall back to 48 kHz only when there's no
+            // input connected (engine will then error out anyway).
+            sample_rate: file_sr_hint.unwrap_or(RECORDER_DEFAULT_SR),
         }),
     }
 }
@@ -684,9 +765,10 @@ fn spawn_meter_thread(app: AppHandle, meters: Vec<MeterHandle>) -> MeterTickThre
 
 fn start_recorder_worker(
     path: PathBuf,
+    sample_rate: u32,
     consumers: Vec<BridgeConsumer>,
 ) -> AppResult<RecorderWorker> {
-    let mut recorder = WavRecorder::create(&path, RECORDER_SR)?;
+    let mut recorder = WavRecorder::create(&path, sample_rate)?;
     let stop = Arc::new(AtomicBool::new(false));
     let stop_thread = stop.clone();
     let mut consumers = consumers;
@@ -695,6 +777,15 @@ fn start_recorder_worker(
         .name(format!("recorder:{}", path.display()))
         .spawn(move || {
             const BLOCK_FRAMES: usize = 1024;
+            // Flush the WAV every 2 seconds of wall time. Hound's underlying
+            // BufWriter caches bytes; without a periodic flush, a hard crash
+            // loses *all* unsynced audio. flush() doesn't update the RIFF
+            // header (hound only does that on finalize), so on crash the file
+            // still needs ffmpeg-style RIFF repair — but the audio bytes are
+            // safe on disk, which is what matters for a session recovery.
+            const FLUSH_INTERVAL: Duration = Duration::from_secs(2);
+            let mut last_flush = std::time::Instant::now();
+
             let mut block: Vec<f32> = vec![0.0; BLOCK_FRAMES * 2];
             while !stop_thread.load(Ordering::SeqCst) {
                 // Fill one block by polling each bridge once per frame.
@@ -723,6 +814,12 @@ fn start_recorder_worker(
                 if let Err(e) = recorder.write_stereo(&block) {
                     warn!(error = %e, "wav write failed; stopping recorder");
                     break;
+                }
+                if last_flush.elapsed() >= FLUSH_INTERVAL {
+                    if let Err(e) = recorder.flush() {
+                        warn!(error = %e, "wav flush failed");
+                    }
+                    last_flush = std::time::Instant::now();
                 }
                 if !produced_any {
                     // Inputs not feeding us yet → don't busy-loop.
