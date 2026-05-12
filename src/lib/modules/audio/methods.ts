@@ -17,6 +17,10 @@ export const methods = {
 	startPipeline: (graph: StartPipelinePayload): Promise<void> =>
 		invoke('start_pipeline', { graph }),
 	stopPipeline: (): Promise<void> => invoke('stop_pipeline'),
+	/** Push a live parameter patch for an effect node. No-op when the pipeline
+	 * isn't running on the backend, so callers can fire-and-forget. */
+	updateEffect: (nodeId: string, data: Record<string, unknown>): Promise<void> =>
+		invoke('update_effect', { nodeId, data }),
 	onState: (cb: (e: AudioStateEvent) => void): Promise<UnlistenFn> =>
 		listen<AudioStateEvent>(AUDIO_STATE_EVENT, (evt) => cb(evt.payload))
 };

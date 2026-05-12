@@ -24,7 +24,7 @@ use tauri::{AppHandle, Emitter};
 use tracing::{info, warn};
 
 use crate::audio::device::{self, DeviceKind};
-use crate::audio::effects::{build_chain, Effect};
+use crate::audio::effects::{build_chain, Effect, EffectControl, MeterHandle};
 use crate::audio::graph::{
     EffectChain, InputSpec, OutputSpec, ValidGraph, ValidInput, ValidOutput,
 };
@@ -34,6 +34,8 @@ use crate::audio::streams;
 use crate::error::{AppError, AppResult};
 
 const STATE_EVENT: &str = "audio://state";
+const METER_EVENT: &str = "audio://meter";
+const METER_TICK: Duration = Duration::from_millis(33);
 
 /// Ring buffer length (in stereo f32 samples) per bridge. Chosen to absorb
 /// ~250 ms of jitter at 48 kHz stereo (~24 000 samples) — plenty of headroom.
@@ -54,6 +56,41 @@ pub struct ActivePipeline {
     _input_streams: Vec<InputHandle>,
     _speaker_streams: Vec<cpal::Stream>,
     _workers: Vec<RecorderWorker>,
+    /// node_id → live control handle. Each effect is 1→1 in the graph, so a
+    /// node id corresponds to at most one runtime effect instance.
+    effect_controls: HashMap<String, EffectControl>,
+    /// LevelMeter tick thread — emits `audio://meter` events at ~30 Hz with
+    /// peak + RMS per channel for every meter in the graph. `None` when no
+    /// meters were placed.
+    _meter_thread: Option<MeterTickThread>,
+}
+
+/// Periodically polls every meter's atomics and emits one Tauri event per
+/// meter so the UI can draw bars. Stops cleanly on drop.
+struct MeterTickThread {
+    stop: Arc<AtomicBool>,
+    join: Option<JoinHandle<()>>,
+}
+
+impl Drop for MeterTickThread {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::SeqCst);
+        if let Some(j) = self.join.take() {
+            let _ = j.join();
+        }
+    }
+}
+
+impl ActivePipeline {
+    /// Apply a parameter patch from the frontend to the runtime effect.
+    /// Silently no-ops when the node id isn't an effect in this pipeline —
+    /// the frontend pushes updates for every node-data change and we don't
+    /// want non-effect updates (mic device, file path) to surface as errors.
+    pub fn update_effect(&self, node_id: &str, data: &serde_json::Value) {
+        if let Some(control) = self.effect_controls.get(node_id) {
+            control.apply_update(data);
+        }
+    }
 }
 
 /// Unified RAII handle for the different input source backends. The wrapped
@@ -102,21 +139,26 @@ impl BridgeConsumer {
         input_sr: u32,
         output_sr: u32,
         effects: &EffectChain,
-    ) -> AppResult<Self> {
+    ) -> AppResult<(Self, Vec<(String, EffectControl)>, Vec<MeterHandle>)> {
         let resampler = if input_sr == output_sr {
             None
         } else {
             Some(StereoResampler::new(input_sr, output_sr, RESAMPLE_CHUNK)?)
         };
         let out_max = resampler.as_ref().map(|r| r.out_max()).unwrap_or(RESAMPLE_CHUNK);
-        Ok(Self {
-            consumer,
-            resampler,
-            input_staging: Vec::with_capacity(RESAMPLE_CHUNK * 2 + 8),
-            output_staging: std::collections::VecDeque::with_capacity(out_max * 4),
-            effects: build_chain(effects),
-            chunk_tmp: Vec::with_capacity(out_max * 2),
-        })
+        let (chain, controls, meters) = build_chain(effects);
+        Ok((
+            Self {
+                consumer,
+                resampler,
+                input_staging: Vec::with_capacity(RESAMPLE_CHUNK * 2 + 8),
+                output_staging: std::collections::VecDeque::with_capacity(out_max * 4),
+                effects: chain,
+                chunk_tmp: Vec::with_capacity(out_max * 2),
+            },
+            controls,
+            meters,
+        ))
     }
 
     /// Pull one frame (L,R) from the staging FIFO, refilling from the input
@@ -202,10 +244,11 @@ pub fn build(graph: &ValidGraph, app: AppHandle) -> AppResult<ActivePipeline> {
         output_runtime.insert(out.id.clone(), resolved);
     }
 
-    // 3. Create per-bridge ring buffers.
+    // 3. Create per-bridge ring buffers and collect live-control handles.
     let mut producers_by_input: HashMap<String, Vec<Producer<f32>>> = HashMap::new();
-    // BridgeConsumer is wrapped so we can move it into the output side.
     let mut consumers_by_output: HashMap<String, Vec<BridgeConsumer>> = HashMap::new();
+    let mut effect_controls: HashMap<String, EffectControl> = HashMap::new();
+    let mut all_meters: Vec<MeterHandle> = Vec::new();
     for bridge in &graph.bridges {
         let input_sr = *input_native_sr
             .get(&bridge.input_id)
@@ -220,7 +263,14 @@ pub fn build(graph: &ValidGraph, app: AppHandle) -> AppResult<ActivePipeline> {
             .entry(bridge.input_id.clone())
             .or_default()
             .push(producer);
-        let bc = BridgeConsumer::new(consumer, input_sr, output_sr, &bridge.effects)?;
+        let (bc, controls, bridge_meters) =
+            BridgeConsumer::new(consumer, input_sr, output_sr, &bridge.effects)?;
+        for (node_id, control) in controls {
+            // Effects are 1→1: each node id occurs in exactly one chain, so
+            // the first insert wins and `insert` is effectively idempotent.
+            effect_controls.entry(node_id).or_insert(control);
+        }
+        all_meters.extend(bridge_meters);
         consumers_by_output
             .entry(bridge.output_id.clone())
             .or_default()
@@ -260,10 +310,19 @@ pub fn build(graph: &ValidGraph, app: AppHandle) -> AppResult<ActivePipeline> {
         "pipeline started"
     );
 
+    // 6. Spawn the meter tick thread if any LevelMeter exists in the graph.
+    let meter_thread = if all_meters.is_empty() {
+        None
+    } else {
+        Some(spawn_meter_thread(app.clone(), all_meters))
+    };
+
     Ok(ActivePipeline {
         _input_streams: input_streams,
         _speaker_streams: speaker_streams,
         _workers: workers,
+        effect_controls,
+        _meter_thread: meter_thread,
     })
 }
 
@@ -587,6 +646,38 @@ fn start_speaker_stream(
         fill,
         err_cb,
     )
+}
+
+// ---------- meter tick thread ----------
+
+fn spawn_meter_thread(app: AppHandle, meters: Vec<MeterHandle>) -> MeterTickThread {
+    let stop = Arc::new(AtomicBool::new(false));
+    let stop_thread = stop.clone();
+    let join = thread::Builder::new()
+        .name("meter-tick".into())
+        .spawn(move || {
+            while !stop_thread.load(Ordering::SeqCst) {
+                thread::sleep(METER_TICK);
+                for m in &meters {
+                    let snap = m.snapshot_and_decay();
+                    let _ = app.emit(
+                        METER_EVENT,
+                        json!({
+                            "nodeId": m.node_id,
+                            "peakL": snap.peak_l,
+                            "peakR": snap.peak_r,
+                            "rmsL": snap.rms_l,
+                            "rmsR": snap.rms_r,
+                        }),
+                    );
+                }
+            }
+        })
+        .expect("spawn meter tick thread");
+    MeterTickThread {
+        stop,
+        join: Some(join),
+    }
 }
 
 // ---------- output runtime: file recording ----------

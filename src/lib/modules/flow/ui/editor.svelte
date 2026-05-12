@@ -4,7 +4,6 @@
 		Controls,
 		SvelteFlow,
 		useSvelteFlow,
-		type Connection,
 		type Edge as XyEdge,
 		type Node as XyNode
 	} from '@xyflow/svelte';
@@ -36,11 +35,6 @@
 		| { kind: 'edge'; edgeId: string; x: number; y: number };
 
 	let contextMenu = $state<ContextMenu | null>(null);
-
-	function onConnect(connection: Connection) {
-		if (!connection.source || !connection.target) return;
-		edges = [...edges, { id: createId(), source: connection.source, target: connection.target }];
-	}
 
 	function onDragOver(event: DragEvent) {
 		event.preventDefault();
@@ -166,7 +160,6 @@
 			{nodeTypes}
 			defaultEdgeOptions={{ animated: true }}
 			deleteKey={['Delete', 'Backspace']}
-			onconnect={onConnect}
 			onnodecontextmenu={onNodeContextMenu}
 			onedgecontextmenu={onEdgeContextMenu}
 			onpaneclick={closeContextMenu}

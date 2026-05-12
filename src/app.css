@@ -34,7 +34,7 @@
 
 @layer base {
     body {
-        @apply bg-background text-theme;
+        @apply bg-background text-theme overflow-hidden;
     }
 
     button {

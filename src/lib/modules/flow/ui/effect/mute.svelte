@@ -1,6 +1,7 @@
 <script lang="ts">
 	import { useSvelteFlow, type Node, type NodeProps } from '@xyflow/svelte';
 	import type { MuteNodeData } from '$lib/modules/pipeline/types';
+	import { methods as audioMethods } from '$lib/modules/audio/methods';
 	import Wrapper from '../node.svelte';
 
 	type MuteNodeType = Node<MuteNodeData, 'mute'>;
@@ -9,7 +10,9 @@
 	const flow = useSvelteFlow();
 
 	function toggle() {
-		flow.updateNodeData(id, { muted: !data.muted });
+		const patch = { muted: !data.muted };
+		flow.updateNodeData(id, patch);
+		audioMethods.updateEffect(id, patch).catch(() => {});
 	}
 </script>
 

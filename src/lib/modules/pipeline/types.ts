@@ -9,7 +9,8 @@ export type NodeKind =
 	| 'gain'
 	| 'mute'
 	| 'channelBalance'
-	| 'limiter';
+	| 'limiter'
+	| 'levelMeter';
 
 export interface MicrophoneNodeData extends Record<string, unknown> {
 	deviceId: string | null;
@@ -49,6 +50,10 @@ export interface LimiterNodeData extends Record<string, unknown> {
 	driveDb: number;
 }
 
+export interface LevelMeterNodeData extends Record<string, unknown> {
+	// no params yet — just visualises the live signal
+}
+
 export type NodeDataMap = {
 	microphone: MicrophoneNodeData;
 	systemAudio: SystemAudioNodeData;
@@ -59,6 +64,7 @@ export type NodeDataMap = {
 	mute: MuteNodeData;
 	channelBalance: ChannelBalanceNodeData;
 	limiter: LimiterNodeData;
+	levelMeter: LevelMeterNodeData;
 };
 
 export type AnyNodeData = NodeDataMap[NodeKind];

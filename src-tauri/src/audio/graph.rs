@@ -38,6 +38,7 @@ pub enum NodeKind {
     Mute,
     ChannelBalance,
     Limiter,
+    LevelMeter,
 }
 
 impl NodeKind {
@@ -45,9 +46,11 @@ impl NodeKind {
         match self {
             NodeKind::Microphone | NodeKind::SystemAudio | NodeKind::AppAudio => NodeCategory::Input,
             NodeKind::Speaker | NodeKind::FileRecording => NodeCategory::Output,
-            NodeKind::Gain | NodeKind::Mute | NodeKind::ChannelBalance | NodeKind::Limiter => {
-                NodeCategory::Effect
-            }
+            NodeKind::Gain
+            | NodeKind::Mute
+            | NodeKind::ChannelBalance
+            | NodeKind::Limiter
+            | NodeKind::LevelMeter => NodeCategory::Effect,
         }
     }
 }
@@ -121,6 +124,10 @@ pub struct LimiterData {
     pub drive_db: f32,
 }
 
+#[derive(Debug, Clone, Copy, Default, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct LevelMeterData {}
+
 /// Typed input variant after validation.
 #[derive(Debug, Clone)]
 pub enum InputSpec {
@@ -143,11 +150,21 @@ pub enum EffectSpec {
     Mute(MuteData),
     ChannelBalance(ChannelBalanceData),
     Limiter(LimiterData),
+    LevelMeter(LevelMeterData),
+}
+
+/// One effect occurrence in a chain: keeps the originating node id so live
+/// parameter updates from the UI can be routed back to the right runtime
+/// effect instance.
+#[derive(Debug, Clone)]
+pub struct EffectInstance {
+    pub node_id: String,
+    pub spec: EffectSpec,
 }
 
 /// A linear chain of effects between an input and an output. Order is from input → output.
 #[derive(Debug, Clone)]
-pub struct EffectChain(pub Vec<EffectSpec>);
+pub struct EffectChain(pub Vec<EffectInstance>);
 
 #[derive(Debug, Clone)]
 pub struct ValidInput {
@@ -363,17 +380,13 @@ fn walk_forward<'a>(
     current: &'a str,
     nodes_by_id: &HashMap<&'a str, &'a NodeSpec>,
     outgoing: &HashMap<&'a str, Vec<&'a str>>,
-    chain: &mut Vec<EffectSpec>,
+    chain: &mut Vec<EffectInstance>,
     out: &mut Vec<Bridge>,
 ) -> AppResult<()> {
     let kids = match outgoing.get(current) {
         Some(v) => v,
         None => return Ok(()),
     };
-    // For the input node at the start, `current` is the input. For effects (1→1)
-    // the only child is the next node. We track the input id via the chain's start.
-    // To preserve `input_id` across recursion, we pass it via a special accumulator:
-    // we recompute it from the call site instead.
     for &child in kids {
         let child_node = nodes_by_id[child];
         match child_node.kind.category() {
@@ -385,8 +398,11 @@ fn walk_forward<'a>(
                 });
             }
             NodeCategory::Effect => {
-                let eff = effect_from_node(child_node)?;
-                chain.push(eff);
+                let spec = effect_from_node(child_node)?;
+                chain.push(EffectInstance {
+                    node_id: child.to_string(),
+                    spec,
+                });
                 walk_forward(child, nodes_by_id, outgoing, chain, out)?;
                 chain.pop();
             }
@@ -430,6 +446,7 @@ fn effect_from_node(n: &NodeSpec) -> AppResult<EffectSpec> {
         NodeKind::Mute => EffectSpec::Mute(parse(&n.data, "Mute")?),
         NodeKind::ChannelBalance => EffectSpec::ChannelBalance(parse(&n.data, "ChannelBalance")?),
         NodeKind::Limiter => EffectSpec::Limiter(parse(&n.data, "Limiter")?),
+        NodeKind::LevelMeter => EffectSpec::LevelMeter(parse(&n.data, "LevelMeter")?),
         _ => unreachable!("non-effect kind passed to effect_from_node"),
     })
 }

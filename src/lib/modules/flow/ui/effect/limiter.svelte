@@ -1,6 +1,7 @@
 <script lang="ts">
 	import { useSvelteFlow, type Node, type NodeProps } from '@xyflow/svelte';
 	import type { LimiterNodeData } from '$lib/modules/pipeline/types';
+	import { methods as audioMethods } from '$lib/modules/audio/methods';
 	import Wrapper from '../node.svelte';
 	import Slider from './_slider.svelte';
 
@@ -10,10 +11,14 @@
 	const flow = useSvelteFlow();
 
 	function setThreshold(v: number) {
-		flow.updateNodeData(id, { thresholdDb: v });
+		const patch = { thresholdDb: v };
+		flow.updateNodeData(id, patch);
+		audioMethods.updateEffect(id, patch).catch(() => {});
 	}
 	function setDrive(v: number) {
-		flow.updateNodeData(id, { driveDb: v });
+		const patch = { driveDb: v };
+		flow.updateNodeData(id, patch);
+		audioMethods.updateEffect(id, patch).catch(() => {});
 	}
 </script>
 

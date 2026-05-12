@@ -26,6 +26,7 @@ pub fn run() {
             commands::list_audio_applications,
             commands::start_pipeline,
             commands::stop_pipeline,
+            commands::update_effect,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -15,6 +15,7 @@ import Gain from '../ui/effect/gain.svelte';
 import Mute from '../ui/effect/mute.svelte';
 import ChannelBalance from '../ui/effect/channel_balance.svelte';
 import Limiter from '../ui/effect/limiter.svelte';
+import LevelMeter from '../ui/effect/level_meter.svelte';
 
 // MIME type used during drag-and-drop from the sidebar.
 export const DND_MIME = 'application/x-betteraudio-nodekind';
@@ -104,6 +105,14 @@ export const registry: Record<NodeKind, NodeRegistryEntry> = {
 		description: 'Soft (tanh-based) limiter — saturates instead of clipping.',
 		component: Limiter,
 		defaultData: { thresholdDb: -0.3, driveDb: 0 }
+	}),
+	levelMeter: entry<'levelMeter'>({
+		kind: 'levelMeter',
+		category: 'effect',
+		label: 'Level Meter',
+		description: 'Live L/R peak + RMS meter. Pass-through — drop it anywhere in a chain to watch the signal.',
+		component: LevelMeter,
+		defaultData: {}
 	})
 };
 

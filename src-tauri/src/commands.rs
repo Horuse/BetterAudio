@@ -53,6 +53,26 @@ pub fn start_pipeline(
 }
 
 #[tauri::command]
+pub fn update_effect(
+    node_id: String,
+    data: serde_json::Value,
+    state: State<'_, AppState>,
+) -> AppResult<()> {
+    let (reply_tx, reply_rx) = mpsc::channel();
+    state
+        .audio_tx
+        .send(Command::UpdateEffect {
+            node_id,
+            data,
+            reply: reply_tx,
+        })
+        .map_err(|_| AppError::Stream("audio thread is gone".into()))?;
+    reply_rx
+        .recv()
+        .map_err(|_| AppError::Stream("audio thread reply lost".into()))?
+}
+
+#[tauri::command]
 pub fn stop_pipeline(state: State<'_, AppState>, app: AppHandle) -> AppResult<()> {
     let (reply_tx, reply_rx) = mpsc::channel();
     state

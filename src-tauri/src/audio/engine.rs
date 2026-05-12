@@ -22,6 +22,13 @@ pub enum Command {
     Stop {
         reply: Sender<AppResult<()>>,
     },
+    /// Live parameter update for an effect node. Silently no-ops when the
+    /// pipeline isn't running or the node id isn't an effect.
+    UpdateEffect {
+        node_id: String,
+        data: serde_json::Value,
+        reply: Sender<AppResult<()>>,
+    },
 }
 
 pub fn run(rx: Receiver<Command>) {
@@ -52,6 +59,16 @@ pub fn run(rx: Receiver<Command>) {
                 } else {
                     let _ = reply.send(Ok(()));
                 }
+            }
+            Command::UpdateEffect {
+                node_id,
+                data,
+                reply,
+            } => {
+                if let Some(p) = &active {
+                    p.update_effect(&node_id, &data);
+                }
+                let _ = reply.send(Ok(()));
             }
         }
     }

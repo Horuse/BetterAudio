@@ -2,17 +2,23 @@
 <project version="4">
   <component name="ChangeListManager">
     <list default="true" id="cce1b1f3-4ac0-4653-be84-5b7f7c0043af" name="Changes" comment="">
-      <change afterPath="$PROJECT_DIR$/src/lib/components/layout/header.svelte" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/src/lib/stores/theme.ts" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/src/lib/utils/transition.ts" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/.gitignore" beforeDir="false" afterPath="$PROJECT_DIR$/.gitignore" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/src-tauri/capabilities/default.json" beforeDir="false" afterPath="$PROJECT_DIR$/src-tauri/capabilities/default.json" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/src-tauri/tauri.conf.json" beforeDir="false" afterPath="$PROJECT_DIR$/src-tauri/tauri.conf.json" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src-tauri/src/audio/effects.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src-tauri/src/audio/effects.rs" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src-tauri/src/audio/engine.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src-tauri/src/audio/engine.rs" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src-tauri/src/audio/graph.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src-tauri/src/audio/graph.rs" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src-tauri/src/audio/pipeline.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src-tauri/src/audio/pipeline.rs" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src-tauri/src/commands.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src-tauri/src/commands.rs" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src-tauri/src/lib.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src-tauri/src/lib.rs" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/src/app.css" beforeDir="false" afterPath="$PROJECT_DIR$/src/app.css" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/src/lib/components/ActivationButton.svelte" beforeDir="false" afterPath="$PROJECT_DIR$/src/lib/components/ActivationButton.svelte" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/src/lib/components/PipelineList.svelte" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/src/routes/+layout.svelte" beforeDir="false" afterPath="$PROJECT_DIR$/src/routes/+layout.svelte" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/src/routes/+page.svelte" beforeDir="false" afterPath="$PROJECT_DIR$/src/routes/+page.svelte" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/lib/modules/audio/methods.ts" beforeDir="false" afterPath="$PROJECT_DIR$/src/lib/modules/audio/methods.ts" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/lib/modules/flow/ui/editor.svelte" beforeDir="false" afterPath="$PROJECT_DIR$/src/lib/modules/flow/ui/editor.svelte" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/lib/modules/flow/ui/effect/channel_balance.svelte" beforeDir="false" afterPath="$PROJECT_DIR$/src/lib/modules/flow/ui/effect/channel_balance.svelte" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/lib/modules/flow/ui/effect/gain.svelte" beforeDir="false" afterPath="$PROJECT_DIR$/src/lib/modules/flow/ui/effect/gain.svelte" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/lib/modules/flow/ui/effect/limiter.svelte" beforeDir="false" afterPath="$PROJECT_DIR$/src/lib/modules/flow/ui/effect/limiter.svelte" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/lib/modules/flow/ui/effect/mute.svelte" beforeDir="false" afterPath="$PROJECT_DIR$/src/lib/modules/flow/ui/effect/mute.svelte" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/lib/modules/flow/ui/sidebar.svelte" beforeDir="false" afterPath="$PROJECT_DIR$/src/lib/modules/flow/ui/sidebar.svelte" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/lib/modules/pipeline/types.ts" beforeDir="false" afterPath="$PROJECT_DIR$/src/lib/modules/pipeline/types.ts" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/src/routes/pipelines/[id]/+page.svelte" beforeDir="false" afterPath="$PROJECT_DIR$/src/routes/pipelines/[id]/+page.svelte" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
@@ -30,22 +36,22 @@
   <component name="Git.Settings">
     <option name="RECENT_GIT_ROOT_PATH" value="$PROJECT_DIR$" />
   </component>
-  <component name="GitHubPullRequestSearchHistory"><![CDATA[{
-  "lastFilter": {
-    "state": "OPEN",
-    "assignee": "Horuse"
+  <component name="GitHubPullRequestSearchHistory">{
+  &quot;lastFilter&quot;: {
+    &quot;state&quot;: &quot;OPEN&quot;,
+    &quot;assignee&quot;: &quot;Horuse&quot;
   }
-}]]></component>
-  <component name="GithubPullRequestsUISettings"><![CDATA[{
-  "selectedUrlAndAccountId": {
-    "url": "https://github.com/Horuse/BetterAudio.git",
-    "accountId": "b0a1213c-2f8d-4df8-bb9d-5f2608c8cd6b"
+}</component>
+  <component name="GithubPullRequestsUISettings">{
+  &quot;selectedUrlAndAccountId&quot;: {
+    &quot;url&quot;: &quot;https://github.com/Horuse/BetterAudio.git&quot;,
+    &quot;accountId&quot;: &quot;b0a1213c-2f8d-4df8-bb9d-5f2608c8cd6b&quot;
   }
-}]]></component>
-  <component name="ProjectColorInfo"><![CDATA[{
-  "associatedIndex": 0,
-  "fromUser": false
-}]]></component>
+}</component>
+  <component name="ProjectColorInfo">{
+  &quot;associatedIndex&quot;: 0,
+  &quot;fromUser&quot;: false
+}</component>
   <component name="ProjectId" id="3DabXJum8VwIN3BNweKh1OgVJTx" />
   <component name="ProjectLevelVcsManager">
     <ConfirmationsSetting value="2" id="Add" />
@@ -54,24 +60,24 @@
     <option name="hideEmptyMiddlePackages" value="true" />
     <option name="showLibraryContents" value="true" />
   </component>
-  <component name="PropertiesComponent"><![CDATA[{
-  "keyToString": {
-    "ModuleVcsDetector.initialDetectionPerformed": "true",
-    "RunOnceActivity.ShowReadmeOnStart": "true",
-    "RunOnceActivity.TerminalTabsStorage.copyFrom.TerminalArrangementManager.252": "true",
-    "RunOnceActivity.git.unshallow": "true",
-    "RunOnceActivity.typescript.service.memoryLimit.init": "true",
-    "codeWithMe.voiceChat.enabledByDefault": "false",
-    "git-widget-placeholder": "main",
-    "javascript.preferred.runtime.type.id": "node",
-    "last_opened_file_path": "/Users/heorhii/WebstormProjects/BetterAudio/src/lib/utils",
-    "nodejs_package_manager_path": "npm",
-    "prettierjs.PrettierConfiguration.Package": "/Users/heorhii/WebstormProjects/BetterAudio/node_modules/prettier",
-    "settings.editor.selected.configurable": "preferences.keymap",
-    "ts.external.directory.path": "/Users/heorhii/WebstormProjects/BetterAudio/node_modules/typescript/lib",
-    "vue.rearranger.settings.migration": "true"
+  <component name="PropertiesComponent">{
+  &quot;keyToString&quot;: {
+    &quot;ModuleVcsDetector.initialDetectionPerformed&quot;: &quot;true&quot;,
+    &quot;RunOnceActivity.ShowReadmeOnStart&quot;: &quot;true&quot;,
+    &quot;RunOnceActivity.TerminalTabsStorage.copyFrom.TerminalArrangementManager.252&quot;: &quot;true&quot;,
+    &quot;RunOnceActivity.git.unshallow&quot;: &quot;true&quot;,
+    &quot;RunOnceActivity.typescript.service.memoryLimit.init&quot;: &quot;true&quot;,
+    &quot;codeWithMe.voiceChat.enabledByDefault&quot;: &quot;false&quot;,
+    &quot;git-widget-placeholder&quot;: &quot;main&quot;,
+    &quot;javascript.preferred.runtime.type.id&quot;: &quot;node&quot;,
+    &quot;last_opened_file_path&quot;: &quot;/Users/heorhii/WebstormProjects/BetterAudio/src/lib/utils&quot;,
+    &quot;nodejs_package_manager_path&quot;: &quot;npm&quot;,
+    &quot;prettierjs.PrettierConfiguration.Package&quot;: &quot;/Users/heorhii/WebstormProjects/BetterAudio/node_modules/prettier&quot;,
+    &quot;settings.editor.selected.configurable&quot;: &quot;preferences.keymap&quot;,
+    &quot;ts.external.directory.path&quot;: &quot;/Users/heorhii/WebstormProjects/BetterAudio/node_modules/typescript/lib&quot;,
+    &quot;vue.rearranger.settings.migration&quot;: &quot;true&quot;
   }
-}]]></component>
+}</component>
   <component name="RecentsManager">
     <key name="CopyFile.RECENT_KEYS">
       <recent name="$PROJECT_DIR$/src/lib/utils" />
@@ -96,7 +102,8 @@
       <option name="number" value="Default" />
       <option name="presentableId" value="Default" />
       <updated>1778523165465</updated>
-      <workItem from="1778523166471" duration="11264000" />
+      <workItem from="1778523166471" duration="17153000" />
+      <workItem from="1778599917673" duration="11827000" />
     </task>
     <servers />
   </component>
