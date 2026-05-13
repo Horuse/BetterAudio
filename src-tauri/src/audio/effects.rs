@@ -11,7 +11,7 @@ use std::sync::Arc;
 use serde_json::Value;
 
 use crate::audio::graph::{
-    ChannelBalanceData, EffectSpec, GainData, LevelMeterData, LimiterData, MuteData,
+    ChannelBalanceData, EffectSpec, EqData, GainData, LevelMeterData, LimiterData, MuteData,
 };
 
 pub trait Effect: Send {
@@ -26,6 +26,7 @@ pub enum RuntimeEffect {
     Mute(MuteEffect),
     ChannelBalance(ChannelBalanceEffect),
     Limiter(LimiterEffect),
+    Eq(EqEffect),
     LevelMeter(LevelMeterEffect),
 }
 
@@ -37,6 +38,7 @@ impl RuntimeEffect {
             RuntimeEffect::Mute(e) => e.process(samples, frames),
             RuntimeEffect::ChannelBalance(e) => e.process(samples, frames),
             RuntimeEffect::Limiter(e) => e.process(samples, frames),
+            RuntimeEffect::Eq(e) => e.process(samples, frames),
             RuntimeEffect::LevelMeter(e) => e.process(samples, frames),
         }
     }
@@ -58,6 +60,10 @@ pub enum EffectControl {
         ceiling: Arc<AtomicU32>,
         drive: Arc<AtomicU32>,
         inv_ceiling: Arc<AtomicU32>,
+    },
+    Eq {
+        /// One gain atomic per ISO octave band; see EQ_FREQUENCIES_HZ for order.
+        gains: [Arc<AtomicU32>; 10],
     },
 }
 
@@ -96,6 +102,15 @@ impl EffectControl {
                 }
                 if let Some(db) = num(data, "driveDb") {
                     store_f32(drive, db_to_linear(db));
+                }
+            }
+            EffectControl::Eq { gains } => {
+                if let Some(arr) = data.get("gainsDb").and_then(Value::as_array) {
+                    for (i, slot) in gains.iter().enumerate() {
+                        if let Some(v) = arr.get(i).and_then(Value::as_f64) {
+                            store_f32(slot, v as f32);
+                        }
+                    }
                 }
             }
         }
@@ -339,6 +354,176 @@ impl Effect for LimiterEffect {
     }
 }
 
+/// RBJ cookbook biquad in Transposed Direct Form II — one state pair (z1, z2)
+/// per channel, half the rounding noise of DF I.
+#[derive(Clone, Copy, Default)]
+pub struct Biquad {
+    pub b0: f32,
+    pub b1: f32,
+    pub b2: f32,
+    pub a1: f32,
+    pub a2: f32,
+    z1: f32,
+    z2: f32,
+}
+
+impl Biquad {
+    #[inline]
+    fn process(&mut self, x: f32) -> f32 {
+        let y = self.b0 * x + self.z1;
+        self.z1 = self.b1 * x - self.a1 * y + self.z2;
+        self.z2 = self.b2 * x - self.a2 * y;
+        y
+    }
+
+}
+
+#[derive(Clone, Copy)]
+pub enum BandShape {
+    Lpf,
+    Hpf,
+}
+
+/// RBJ cookbook coefficients.
+pub fn biquad_for(shape: BandShape, freq_hz: f32, q: f32, sample_rate: u32) -> Biquad {
+    let fs = sample_rate as f32;
+    let w0 = 2.0 * std::f32::consts::PI * (freq_hz.max(1.0) / fs);
+    let (sinw, cosw) = (w0.sin(), w0.cos());
+    let q = q.max(0.05);
+    let alpha = sinw / (2.0 * q);
+
+    let (b0, b1, b2, a0, a1, a2) = match shape {
+        BandShape::Lpf => (
+            (1.0 - cosw) * 0.5,
+            1.0 - cosw,
+            (1.0 - cosw) * 0.5,
+            1.0 + alpha,
+            -2.0 * cosw,
+            1.0 - alpha,
+        ),
+        BandShape::Hpf => (
+            (1.0 + cosw) * 0.5,
+            -(1.0 + cosw),
+            (1.0 + cosw) * 0.5,
+            1.0 + alpha,
+            -2.0 * cosw,
+            1.0 - alpha,
+        ),
+    };
+    let inv = 1.0 / a0;
+    Biquad {
+        b0: b0 * inv,
+        b1: b1 * inv,
+        b2: b2 * inv,
+        a1: a1 * inv,
+        a2: a2 * inv,
+        z1: 0.0,
+        z2: 0.0,
+    }
+}
+
+/// Linkwitz-Riley 4th-order crossover points: geometric means between adjacent
+/// band centres. LR4 = two cascaded 2nd-order Butterworth biquads; sum of
+/// matched LPF/HPF at the same fc is allpass, so all 10 bands sum back to a
+/// magnitude-flat output when their gains are unity.
+const EQ_CROSSOVER_FREQS: [f32; 9] = [
+    45.2548, 89.4427, 176.7767, 353.5534, 707.1068, 1414.2136, 2828.4271, 5656.8542, 11313.7085,
+];
+
+const BUTTER_Q: f32 = std::f32::consts::FRAC_1_SQRT_2; // 1/√2 ≈ 0.7071
+
+/// Cascaded pair of Butterworth biquads — a 4th-order Linkwitz-Riley section.
+#[derive(Clone, Copy, Default)]
+struct Lr4 {
+    a: Biquad,
+    b: Biquad,
+}
+
+impl Lr4 {
+    fn new(shape: BandShape, freq_hz: f32, sample_rate: u32) -> Self {
+        let c = biquad_for(shape, freq_hz, BUTTER_Q, sample_rate);
+        Lr4 { a: c, b: c }
+    }
+    #[inline]
+    fn process(&mut self, x: f32) -> f32 {
+        self.b.process(self.a.process(x))
+    }
+}
+
+/// Per-channel filter chain. The input cascades through 9 crossover splits:
+/// each split peels off one band's slice via LPF and forwards the HPF residual
+/// to the next stage. Band gains scale these slices and we sum.
+struct ChannelChain {
+    lpfs: [Lr4; 9],
+    hpfs: [Lr4; 9],
+}
+
+impl ChannelChain {
+    fn new(sample_rate: u32) -> Self {
+        Self {
+            lpfs: std::array::from_fn(|i| {
+                Lr4::new(BandShape::Lpf, EQ_CROSSOVER_FREQS[i], sample_rate)
+            }),
+            hpfs: std::array::from_fn(|i| {
+                Lr4::new(BandShape::Hpf, EQ_CROSSOVER_FREQS[i], sample_rate)
+            }),
+        }
+    }
+
+    #[inline]
+    fn process(&mut self, x: f32, gains_linear: &[f32; 10]) -> f32 {
+        let mut residual = x;
+        let mut sum = 0.0;
+        for i in 0..9 {
+            let band = self.lpfs[i].process(residual);
+            residual = self.hpfs[i].process(residual);
+            sum += band * gains_linear[i];
+        }
+        sum + residual * gains_linear[9]
+    }
+}
+
+pub struct EqEffect {
+    channels: [ChannelChain; 2],
+    gains: [Arc<AtomicU32>; 10],
+}
+
+impl EqEffect {
+    fn new(d: EqData, sample_rate: u32) -> (Self, EffectControl) {
+        let gains: [Arc<AtomicU32>; 10] =
+            std::array::from_fn(|i| Arc::new(AtomicU32::new(d.gains_db[i].to_bits())));
+        let control = EffectControl::Eq {
+            gains: gains.clone(),
+        };
+        (
+            Self {
+                channels: [ChannelChain::new(sample_rate), ChannelChain::new(sample_rate)],
+                gains,
+            },
+            control,
+        )
+    }
+
+    fn from_gains(gains: [Arc<AtomicU32>; 10], sample_rate: u32) -> Self {
+        Self {
+            channels: [ChannelChain::new(sample_rate), ChannelChain::new(sample_rate)],
+            gains,
+        }
+    }
+}
+
+impl Effect for EqEffect {
+    fn process(&mut self, samples: &mut [f32], frames: usize) {
+        let gains_linear: [f32; 10] =
+            std::array::from_fn(|i| db_to_linear(load_f32(&self.gains[i])));
+        let stereo = &mut samples[..frames * 2];
+        for frame in stereo.chunks_exact_mut(2) {
+            frame[0] = self.channels[0].process(frame[0], &gains_linear);
+            frame[1] = self.channels[1].process(frame[1], &gains_linear);
+        }
+    }
+}
+
 pub struct EffectBuild {
     pub effect: RuntimeEffect,
     /// Some only on the first instantiation per node id.
@@ -364,6 +549,7 @@ impl EffectRegistry {
 pub fn instantiate_effect(
     spec: &EffectSpec,
     node_id: &str,
+    sample_rate: u32,
     registry: &mut EffectRegistry,
 ) -> EffectBuild {
     match *spec {
@@ -441,6 +627,22 @@ pub fn instantiate_effect(
                 registry.controls.insert(node_id.to_string(), c.clone());
                 EffectBuild {
                     effect: RuntimeEffect::Limiter(e),
+                    control: Some(c),
+                    meter: None,
+                }
+            }
+        },
+        EffectSpec::Eq(d) => match registry.controls.get(node_id) {
+            Some(EffectControl::Eq { gains }) => EffectBuild {
+                effect: RuntimeEffect::Eq(EqEffect::from_gains(gains.clone(), sample_rate)),
+                control: None,
+                meter: None,
+            },
+            _ => {
+                let (e, c) = EqEffect::new(d, sample_rate);
+                registry.controls.insert(node_id.to_string(), c.clone());
+                EffectBuild {
+                    effect: RuntimeEffect::Eq(e),
                     control: Some(c),
                     meter: None,
                 }

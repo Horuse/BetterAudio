@@ -10,6 +10,7 @@ export type NodeKind =
 	| 'mute'
 	| 'channelBalance'
 	| 'limiter'
+	| 'eq'
 	| 'levelMeter';
 
 export interface MicrophoneNodeData extends Record<string, unknown> {
@@ -50,6 +51,11 @@ export interface LimiterNodeData extends Record<string, unknown> {
 	driveDb: number;
 }
 
+export interface EqNodeData extends Record<string, unknown> {
+	/** Per-band gain in dB at ISO octave centres 32/64/125/250/500/1k/2k/4k/8k/16k. */
+	gainsDb: number[];
+}
+
 export interface LevelMeterNodeData extends Record<string, unknown> {
 	// no params yet — just visualises the live signal
 }
@@ -64,6 +70,7 @@ export type NodeDataMap = {
 	mute: MuteNodeData;
 	channelBalance: ChannelBalanceNodeData;
 	limiter: LimiterNodeData;
+	eq: EqNodeData;
 	levelMeter: LevelMeterNodeData;
 };
 

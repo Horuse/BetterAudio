@@ -657,7 +657,7 @@ fn build_output_graph(
             id_to_index.insert(id.clone(), nodes.len());
             nodes.push(DagNode::Source(source));
         } else if let Some(effect) = valid.effects.iter().find(|e| &e.id == id) {
-            let build = instantiate_effect(&effect.spec, id, registry);
+            let build = instantiate_effect(&effect.spec, id, output_sr, registry);
             if let Some(c) = build.control {
                 controls.push((id.clone(), c));
             }

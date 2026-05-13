@@ -37,6 +37,7 @@ pub enum NodeKind {
     Mute,
     ChannelBalance,
     Limiter,
+    Eq,
     LevelMeter,
 }
 
@@ -49,6 +50,7 @@ impl NodeKind {
             | NodeKind::Mute
             | NodeKind::ChannelBalance
             | NodeKind::Limiter
+            | NodeKind::Eq
             | NodeKind::LevelMeter => NodeCategory::Effect,
         }
     }
@@ -121,6 +123,13 @@ pub struct LimiterData {
     pub drive_db: f32,
 }
 
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EqData {
+    /// One gain per ISO octave band (see `EQ_FREQUENCIES_HZ` in effects.rs).
+    pub gains_db: [f32; 10],
+}
+
 #[derive(Debug, Clone, Copy, Default, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct LevelMeterData {}
@@ -144,6 +153,7 @@ pub enum EffectSpec {
     Mute(MuteData),
     ChannelBalance(ChannelBalanceData),
     Limiter(LimiterData),
+    Eq(EqData),
     LevelMeter(LevelMeterData),
 }
 
@@ -425,6 +435,7 @@ fn effect_from_node(n: &NodeSpec) -> AppResult<EffectSpec> {
         NodeKind::Mute => EffectSpec::Mute(parse(&n.data, "Mute")?),
         NodeKind::ChannelBalance => EffectSpec::ChannelBalance(parse(&n.data, "ChannelBalance")?),
         NodeKind::Limiter => EffectSpec::Limiter(parse(&n.data, "Limiter")?),
+        NodeKind::Eq => EffectSpec::Eq(parse(&n.data, "Eq")?),
         NodeKind::LevelMeter => EffectSpec::LevelMeter(parse(&n.data, "LevelMeter")?),
         _ => unreachable!("non-effect kind passed to effect_from_node"),
     })
