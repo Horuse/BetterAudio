@@ -233,29 +233,32 @@ impl GraphSpec {
                 .push(edge.source.as_str());
         }
 
-        // Effects must have ≤1 outgoing (no sends yet — would require per-output
-        // duplication of the effect instance). Multi-incoming is fine.
-        for n in &self.nodes {
-            if n.kind.category() != NodeCategory::Effect {
-                continue;
-            }
-            let out = outgoing.get(n.id.as_str()).map(Vec::len).unwrap_or(0);
-            if out > 1 {
-                return Err(AppError::Validation(format!(
-                    "effect {:?} has {} outgoing edges (sends not yet supported)",
-                    n.kind, out
-                )));
-            }
-        }
-
         check_acyclic(&self.nodes, &outgoing)?;
 
-        // Bidirectional reachability: a node survives only if it's on some
-        // path input→output.
+        // Monitor mode: no output but ≥1 analyzer (LevelMeter) acts as terminal.
+        let has_outputs = self.nodes.iter().any(|n| n.kind.category() == NodeCategory::Output);
+        let has_analyzers = self
+            .nodes
+            .iter()
+            .any(|n| matches!(n.kind, NodeKind::LevelMeter));
+        if !has_outputs && !has_analyzers {
+            return Err(AppError::Validation(
+                "no routing — connect an input to an output or a Level Meter".into(),
+            ));
+        }
+
         let reachable_from_inputs = bfs_forward(&self.nodes, &outgoing, NodeCategory::Input);
-        let reachable_from_outputs = bfs_backward(&self.nodes, &incoming, NodeCategory::Output);
+        let reachable_from_terminals: HashSet<&str> = if has_outputs {
+            bfs_backward_pred(&self.nodes, &incoming, |n| {
+                n.kind.category() == NodeCategory::Output
+            })
+        } else {
+            bfs_backward_pred(&self.nodes, &incoming, |n| {
+                matches!(n.kind, NodeKind::LevelMeter)
+            })
+        };
         let keep: HashSet<&str> = reachable_from_inputs
-            .intersection(&reachable_from_outputs)
+            .intersection(&reachable_from_terminals)
             .copied()
             .collect();
 
@@ -392,15 +395,15 @@ fn bfs_forward<'a>(
     seen
 }
 
-fn bfs_backward<'a>(
+fn bfs_backward_pred<'a>(
     nodes: &'a [NodeSpec],
     incoming: &HashMap<&'a str, Vec<&'a str>>,
-    start_category: NodeCategory,
+    is_terminal: impl Fn(&NodeSpec) -> bool,
 ) -> HashSet<&'a str> {
     let mut seen = HashSet::new();
     let mut stack: Vec<&str> = nodes
         .iter()
-        .filter(|n| n.kind.category() == start_category)
+        .filter(|n| is_terminal(n))
         .map(|n| n.id.as_str())
         .collect();
     while let Some(cur) = stack.pop() {

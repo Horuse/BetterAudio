@@ -1,6 +1,10 @@
 import type { UnlistenFn } from '@tauri-apps/api/event';
 import { methods } from './methods';
-import type { AudioApplication, AudioDevice } from './types';
+import type {
+	AudioApplication,
+	AudioDevice,
+	StartPipelinePayload
+} from './types';
 
 class AudioStore {
 	inputDevices = $state<AudioDevice[]>([]);
@@ -11,21 +15,25 @@ class AudioStore {
 
 	private unlisten: UnlistenFn | undefined;
 
-	async refreshDevices(): Promise<void> {
-		// list_audio_applications can fail on hosts without ScreenCaptureKit access yet —
-		// don't make device enumeration fail because of it.
-		const [ins, outs, apps] = await Promise.all([
-			methods.listInputDevices(),
-			methods.listOutputDevices(),
-			methods.listAudioApplications().catch(() => [] as AudioApplication[])
-		]);
-		this.inputDevices = ins;
-		this.outputDevices = outs;
-		this.audioApplications = apps;
+	async refreshInputDevices(): Promise<void> {
+		this.inputDevices = await methods.listInputDevices();
+	}
+
+	async refreshOutputDevices(): Promise<void> {
+		this.outputDevices = await methods.listOutputDevices();
+	}
+
+	async refreshAudioApplications(): Promise<void> {
+		// Can fail without ScreenCaptureKit access; treat as empty.
+		this.audioApplications = await methods
+			.listAudioApplications()
+			.catch(() => [] as AudioApplication[]);
 	}
 
 	async init(): Promise<void> {
-		await this.refreshDevices();
+		// App icon generation is slow on first call; fill in the background.
+		await Promise.all([this.refreshInputDevices(), this.refreshOutputDevices()]);
+		void this.refreshAudioApplications();
 		this.unlisten = await methods.onState((e) => {
 			if (e.kind === 'started') {
 				this.isRunning = true;
@@ -37,6 +45,13 @@ class AudioStore {
 				this.lastError = e.message;
 			}
 		});
+	}
+
+	/** Atomically stop + start the pipeline with a fresh graph. Intended for
+	 * the editor's "graph changed while running" auto-apply. */
+	async restartPipeline(graph: StartPipelinePayload): Promise<void> {
+		await methods.stopPipeline().catch(() => {});
+		await methods.startPipeline(graph);
 	}
 
 	destroy(): void {

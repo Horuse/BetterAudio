@@ -341,52 +341,129 @@ impl Effect for LimiterEffect {
 
 pub struct EffectBuild {
     pub effect: RuntimeEffect,
+    /// Some only on the first instantiation per node id.
     pub control: Option<EffectControl>,
+    /// Some only on the first instantiation per node id.
     pub meter: Option<MeterHandle>,
 }
 
-pub fn instantiate_effect(spec: &EffectSpec, node_id: &str) -> EffectBuild {
+/// Shared atomics keyed by node id so a fan-out effect (one node feeding
+/// multiple outputs) keeps live params in sync across instances.
+#[derive(Default)]
+pub struct EffectRegistry {
+    controls: std::collections::HashMap<String, EffectControl>,
+    meters: std::collections::HashMap<String, MeterHandle>,
+}
+
+impl EffectRegistry {
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+pub fn instantiate_effect(
+    spec: &EffectSpec,
+    node_id: &str,
+    registry: &mut EffectRegistry,
+) -> EffectBuild {
     match *spec {
-        EffectSpec::Gain(d) => {
-            let (e, c) = GainEffect::new(d);
-            EffectBuild {
-                effect: RuntimeEffect::Gain(e),
-                control: Some(c),
-                meter: None,
-            }
-        }
-        EffectSpec::Mute(d) => {
-            let (e, c) = MuteEffect::new(d);
-            EffectBuild {
-                effect: RuntimeEffect::Mute(e),
-                control: Some(c),
-                meter: None,
-            }
-        }
-        EffectSpec::ChannelBalance(d) => {
-            let (e, c) = ChannelBalanceEffect::new(d);
-            EffectBuild {
-                effect: RuntimeEffect::ChannelBalance(e),
-                control: Some(c),
-                meter: None,
-            }
-        }
-        EffectSpec::Limiter(d) => {
-            let (e, c) = LimiterEffect::new(d);
-            EffectBuild {
-                effect: RuntimeEffect::Limiter(e),
-                control: Some(c),
-                meter: None,
-            }
-        }
-        EffectSpec::LevelMeter(d) => {
-            let (e, handle) = LevelMeterEffect::new(d, node_id.to_string());
-            EffectBuild {
-                effect: RuntimeEffect::LevelMeter(e),
+        EffectSpec::Gain(d) => match registry.controls.get(node_id) {
+            Some(EffectControl::Gain { linear }) => EffectBuild {
+                effect: RuntimeEffect::Gain(GainEffect {
+                    linear: linear.clone(),
+                }),
                 control: None,
-                meter: Some(handle),
+                meter: None,
+            },
+            _ => {
+                let (e, c) = GainEffect::new(d);
+                registry.controls.insert(node_id.to_string(), c.clone());
+                EffectBuild {
+                    effect: RuntimeEffect::Gain(e),
+                    control: Some(c),
+                    meter: None,
+                }
             }
-        }
+        },
+        EffectSpec::Mute(d) => match registry.controls.get(node_id) {
+            Some(EffectControl::Mute { muted }) => EffectBuild {
+                effect: RuntimeEffect::Mute(MuteEffect {
+                    muted: muted.clone(),
+                }),
+                control: None,
+                meter: None,
+            },
+            _ => {
+                let (e, c) = MuteEffect::new(d);
+                registry.controls.insert(node_id.to_string(), c.clone());
+                EffectBuild {
+                    effect: RuntimeEffect::Mute(e),
+                    control: Some(c),
+                    meter: None,
+                }
+            }
+        },
+        EffectSpec::ChannelBalance(d) => match registry.controls.get(node_id) {
+            Some(EffectControl::ChannelBalance { left, right }) => EffectBuild {
+                effect: RuntimeEffect::ChannelBalance(ChannelBalanceEffect {
+                    left: left.clone(),
+                    right: right.clone(),
+                }),
+                control: None,
+                meter: None,
+            },
+            _ => {
+                let (e, c) = ChannelBalanceEffect::new(d);
+                registry.controls.insert(node_id.to_string(), c.clone());
+                EffectBuild {
+                    effect: RuntimeEffect::ChannelBalance(e),
+                    control: Some(c),
+                    meter: None,
+                }
+            }
+        },
+        EffectSpec::Limiter(d) => match registry.controls.get(node_id) {
+            Some(EffectControl::Limiter {
+                ceiling,
+                drive,
+                inv_ceiling,
+            }) => EffectBuild {
+                effect: RuntimeEffect::Limiter(LimiterEffect {
+                    ceiling: ceiling.clone(),
+                    drive: drive.clone(),
+                    inv_ceiling: inv_ceiling.clone(),
+                }),
+                control: None,
+                meter: None,
+            },
+            _ => {
+                let (e, c) = LimiterEffect::new(d);
+                registry.controls.insert(node_id.to_string(), c.clone());
+                EffectBuild {
+                    effect: RuntimeEffect::Limiter(e),
+                    control: Some(c),
+                    meter: None,
+                }
+            }
+        },
+        EffectSpec::LevelMeter(d) => match registry.meters.get(node_id) {
+            Some(handle) => EffectBuild {
+                effect: RuntimeEffect::LevelMeter(LevelMeterEffect {
+                    handle: handle.clone(),
+                }),
+                control: None,
+                meter: None,
+            },
+            None => {
+                let (e, handle) = LevelMeterEffect::new(d, node_id.to_string());
+                registry.meters.insert(node_id.to_string(), handle.clone());
+                EffectBuild {
+                    effect: RuntimeEffect::LevelMeter(e),
+                    control: None,
+                    meter: Some(handle),
+                }
+            }
+        },
     }
 }
 

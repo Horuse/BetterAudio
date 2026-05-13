@@ -26,7 +26,9 @@ use tracing::{info, warn};
 
 use crate::audio::clock::{ClockSource, SystemClockTicker};
 use crate::audio::device::{self, DeviceKind};
-use crate::audio::effects::{instantiate_effect, EffectControl, MeterHandle, RuntimeEffect};
+use crate::audio::effects::{
+    instantiate_effect, EffectControl, EffectRegistry, MeterHandle, RuntimeEffect,
+};
 use crate::audio::graph::{
     InputSpec, OutputSpec, ValidGraph, ValidInput, ValidOutput,
 };
@@ -383,11 +385,7 @@ impl OutputGraph {
 
 /// Build everything from a validated graph and start playing.
 pub fn build(graph: &ValidGraph, app: AppHandle) -> AppResult<ActivePipeline> {
-    if graph.outputs.is_empty() {
-        return Err(AppError::Validation(
-            "no routing — connect at least one input to at least one output".into(),
-        ));
-    }
+    let monitor_mode = graph.outputs.is_empty();
 
     let mut input_native_sr: HashMap<String, u32> = HashMap::new();
     let mut input_runtime: HashMap<String, ResolvedInput> = HashMap::new();
@@ -395,6 +393,30 @@ pub fn build(graph: &ValidGraph, app: AppHandle) -> AppResult<ActivePipeline> {
         let resolved = resolve_input(inp)?;
         input_native_sr.insert(inp.id.clone(), resolved.sample_rate());
         input_runtime.insert(inp.id.clone(), resolved);
+    }
+
+    // Bluetooth devices used as both Mic and Speaker get forced into HFP
+    // (16/24 kHz mono), conflicting with the A2DP profile we resolved.
+    {
+        use std::collections::HashSet;
+        let mic_devices: HashSet<&str> = graph
+            .inputs
+            .iter()
+            .filter_map(|i| match &i.spec {
+                InputSpec::Microphone { device_id } => Some(device_id.as_str()),
+                _ => None,
+            })
+            .collect();
+        for out in &graph.outputs {
+            if let OutputSpec::Speaker { device_id, .. } = &out.spec {
+                if mic_devices.contains(device_id.as_str()) {
+                    warn!(
+                        device = %device_id,
+                        "speaker device is also used as microphone — macOS will force HFP profile"
+                    );
+                }
+            }
+        }
     }
 
     // File recorders use the highest source SR feeding them so the WAV never
@@ -417,23 +439,44 @@ pub fn build(graph: &ValidGraph, app: AppHandle) -> AppResult<ActivePipeline> {
     let mut output_graphs: HashMap<String, OutputGraph> = HashMap::new();
     let mut effect_controls: HashMap<String, EffectControl> = HashMap::new();
     let mut all_meters: Vec<MeterHandle> = Vec::new();
+    let mut registry = EffectRegistry::new();
     for out in &graph.outputs {
         let output_sr = output_runtime
             .get(&out.id)
             .map(|o| o.sample_rate())
             .ok_or_else(|| AppError::Validation("missing output runtime".into()))?;
         let built = build_output_graph(
-            out.id.as_str(),
+            Some(out.id.as_str()),
             output_sr,
             graph,
             &input_native_sr,
             &mut producers_by_input,
+            &mut registry,
         )?;
         for (id, control) in built.controls {
             effect_controls.entry(id).or_insert(control);
         }
         all_meters.extend(built.meters);
         output_graphs.insert(out.id.clone(), built.graph);
+    }
+
+    let mut monitor_graph: Option<OutputGraph> = None;
+    if monitor_mode {
+        // Highest input SR — don't downsample any source feeding the meter.
+        let monitor_sr = input_native_sr.values().copied().max().unwrap_or(48_000);
+        let built = build_output_graph(
+            None,
+            monitor_sr,
+            graph,
+            &input_native_sr,
+            &mut producers_by_input,
+            &mut registry,
+        )?;
+        for (id, control) in built.controls {
+            effect_controls.entry(id).or_insert(control);
+        }
+        all_meters.extend(built.meters);
+        monitor_graph = Some(built.graph);
     }
 
     let mut input_streams = Vec::with_capacity(input_runtime.len());
@@ -472,6 +515,9 @@ pub fn build(graph: &ValidGraph, app: AppHandle) -> AppResult<ActivePipeline> {
             }
         }
     }
+    if let Some(og) = monitor_graph {
+        workers.push(start_monitor_worker(og)?);
+    }
 
     info!(
         inputs = input_streams.len(),
@@ -507,14 +553,27 @@ struct BuiltOutputGraph {
 /// Build the per-output DAG: walk backward from `output_id`, topo-sort the
 /// reachable sub-graph, instantiate sources (with their rings) and effects
 /// (with their parameter atomics) in order.
+///
+/// `output_id = None` means monitor mode: every surviving input + effect is
+/// reachable (validate already trimmed anything that doesn't drive an
+/// analyzer), and the resulting graph has no output terminals.
 fn build_output_graph(
-    output_id: &str,
+    output_id: Option<&str>,
     output_sr: u32,
     valid: &ValidGraph,
     input_native_sr: &HashMap<String, u32>,
     producers_by_input: &mut HashMap<String, Vec<Producer<f32>>>,
+    registry: &mut EffectRegistry,
 ) -> AppResult<BuiltOutputGraph> {
-    let reachable = reachable_backward(output_id, valid);
+    let reachable: HashSet<String> = match output_id {
+        Some(id) => reachable_backward(id, valid),
+        None => valid
+            .inputs
+            .iter()
+            .map(|i| i.id.clone())
+            .chain(valid.effects.iter().map(|e| e.id.clone()))
+            .collect(),
+    };
 
     // Topo sort restricted to the reachable sub-graph. Inputs have indegree 0
     // within the sub-graph; outputs are excluded entirely (they're not DAG
@@ -549,7 +608,8 @@ fn build_output_graph(
     }
     if topo.len() != reachable.len() {
         return Err(AppError::Validation(format!(
-            "internal: topo sort failed for output {output_id}"
+            "internal: topo sort failed for output {}",
+            output_id.unwrap_or("<monitor>")
         )));
     }
 
@@ -597,7 +657,7 @@ fn build_output_graph(
             id_to_index.insert(id.clone(), nodes.len());
             nodes.push(DagNode::Source(source));
         } else if let Some(effect) = valid.effects.iter().find(|e| &e.id == id) {
-            let build = instantiate_effect(&effect.spec, id);
+            let build = instantiate_effect(&effect.spec, id, registry);
             if let Some(c) = build.control {
                 controls.push((id.clone(), c));
             }
@@ -619,12 +679,15 @@ fn build_output_graph(
         }
     }
 
-    let terminal_indices: Vec<usize> = valid
-        .edges
-        .iter()
-        .filter(|e| e.to == output_id)
-        .filter_map(|e| id_to_index.get(&e.from).copied())
-        .collect();
+    let terminal_indices: Vec<usize> = match output_id {
+        Some(id) => valid
+            .edges
+            .iter()
+            .filter(|e| e.to == id)
+            .filter_map(|e| id_to_index.get(&e.from).copied())
+            .collect(),
+        None => Vec::new(),
+    };
 
     Ok(BuiltOutputGraph {
         graph: OutputGraph {
@@ -956,6 +1019,16 @@ fn native_config(
 /// massive headroom for cpal/scheduler jitter, costs ~128 KB.
 const SPEAKER_RING_CAPACITY: usize = 32_768;
 
+/// macOS Bluetooth often fails first AUHAL bind with DeviceNotAvailable even
+/// when active; 3×300ms covers settling.
+const SPEAKER_MAX_ATTEMPTS: u32 = 3;
+const SPEAKER_RETRY_DELAY: Duration = Duration::from_millis(300);
+
+// Substring match on cpal's stable Display — AppError flattens the variant.
+fn is_device_not_available(e: &AppError) -> bool {
+    matches!(e, AppError::Stream(s) if s.contains("no longer available"))
+}
+
 /// Bundles the cpal stream with the DSP worker that feeds its ring. `Drop`
 /// stops cpal first (so the callback can't read stale memory mid-shutdown),
 /// then signals the worker and joins. Field order matters.
@@ -983,16 +1056,83 @@ fn start_speaker_stream(
     graph: OutputGraph,
     app: &AppHandle,
 ) -> AppResult<SpeakerHandle> {
+    use cpal::traits::DeviceTrait;
+    let device_name = spec
+        .device
+        .name()
+        .unwrap_or_else(|_| "<unknown>".into());
     info!(
+        device = %device_name,
         sample_rate = spec.sample_rate,
         channels = spec.out_channels,
         format = ?spec.sample_format,
         "opening speaker stream",
     );
 
-    // DSP worker fills this ring; the cpal callback drains it. Splits the
-    // resampling/effects work off the RT output thread.
-    let (mut producer, mut consumer) = RingBuffer::<f32>::new(SPEAKER_RING_CAPACITY);
+    // AirPods A2DP↔HFP switch can race resolve_output; verify state fresh.
+    #[cfg(target_os = "macos")]
+    {
+        let fresh = crate::audio::macos_hal::find_output_device(&device_name);
+        match fresh {
+            None => warn!(device = %device_name, "HAL no longer sees the device"),
+            Some(hal) if hal.sample_rate != spec.sample_rate => warn!(
+                device = %device_name,
+                resolved_sample_rate = spec.sample_rate,
+                current_sample_rate = hal.sample_rate,
+                "device sample rate changed between resolve and open"
+            ),
+            Some(hal) if hal.channels as usize != spec.out_channels => warn!(
+                device = %device_name,
+                resolved_channels = spec.out_channels,
+                current_channels = hal.channels,
+                "device channel count changed between resolve and open"
+            ),
+            Some(_) => {}
+        }
+    }
+
+    // cpal consumes the closures on each attempt, so ring + closures are
+    // recreated per iteration.
+    let mut producer_holder: Option<Producer<f32>> = None;
+    let mut stream_holder: Option<cpal::Stream> = None;
+    for attempt in 1..=SPEAKER_MAX_ATTEMPTS {
+        let (producer, mut consumer) = RingBuffer::<f32>::new(SPEAKER_RING_CAPACITY);
+        let fill = move |stereo_out: &mut [f32], _frames: usize| {
+            streams::bulk_pop(&mut consumer, stereo_out);
+        };
+        let app_err = app.clone();
+        let err_cb = move |e: cpal::StreamError| {
+            let _ = app_err.emit(
+                STATE_EVENT,
+                json!({ "kind": "error", "message": format!("output: {e}") }),
+            );
+        };
+        match streams::build_output_stream(
+            &spec.device,
+            &spec.config,
+            spec.sample_format,
+            spec.out_channels,
+            fill,
+            err_cb,
+        ) {
+            Ok(s) => {
+                producer_holder = Some(producer);
+                stream_holder = Some(s);
+                break;
+            }
+            Err(e) if attempt < SPEAKER_MAX_ATTEMPTS && is_device_not_available(&e) => {
+                warn!(
+                    attempt,
+                    error = %e,
+                    "DeviceNotAvailable from cpal; retrying after delay"
+                );
+                thread::sleep(SPEAKER_RETRY_DELAY);
+            }
+            Err(e) => return Err(e),
+        }
+    }
+    let mut producer = producer_holder.expect("loop sets producer on success or returns Err");
+    let stream = stream_holder.expect("loop sets stream on success or returns Err");
 
     let stop = Arc::new(AtomicBool::new(false));
     let stop_thread = stop.clone();
@@ -1009,29 +1149,6 @@ fn start_speaker_stream(
             });
         })
         .map_err(|e| AppError::Stream(format!("spawn speaker worker: {e}")))?;
-
-    let app_err = app.clone();
-    let err_cb = move |e: cpal::StreamError| {
-        let _ = app_err.emit(
-            STATE_EVENT,
-            json!({ "kind": "error", "message": format!("output: {e}") }),
-        );
-    };
-
-    // The cpal callback is now just a ring drain — no resampling, no effects,
-    // no mixing on the RT thread.
-    let fill = move |stereo_out: &mut [f32], _frames: usize| {
-        streams::bulk_pop(&mut consumer, stereo_out);
-    };
-
-    let stream = streams::build_output_stream(
-        &spec.device,
-        &spec.config,
-        spec.sample_format,
-        spec.out_channels,
-        fill,
-        err_cb,
-    )?;
 
     Ok(SpeakerHandle {
         _stream: stream,
@@ -1152,6 +1269,24 @@ impl DspWorker {
             thread::sleep(AVAILABILITY_POLL);
         }
     }
+}
+
+// Drives analyzers when there's no real output; sink discards the mix.
+fn start_monitor_worker(graph: OutputGraph) -> AppResult<RecorderWorker> {
+    let stop = Arc::new(AtomicBool::new(false));
+    let stop_thread = stop.clone();
+    let worker = DspWorker { graph };
+    let pacing = WorkerPacing::OnAvailability;
+    let join = thread::Builder::new()
+        .name("monitor".into())
+        .spawn(move || {
+            worker.run(stop_thread, pacing, |_block| Ok(()));
+        })
+        .map_err(|e| AppError::Stream(format!("spawn monitor worker: {e}")))?;
+    Ok(RecorderWorker {
+        stop,
+        join: Some(join),
+    })
 }
 
 // ---------- output runtime: file recording ----------

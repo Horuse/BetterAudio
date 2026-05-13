@@ -23,7 +23,8 @@ pub fn list_audio_applications() -> AppResult<Vec<AudioApplication>> {
 
 #[cfg(target_os = "macos")]
 mod macos {
-    use std::collections::HashSet;
+    use std::collections::{HashMap, HashSet};
+    use std::sync::{Mutex, OnceLock};
 
     use base64::{engine::general_purpose::STANDARD, Engine as _};
     use objc2_app_kit::{
@@ -32,6 +33,13 @@ mod macos {
     use objc2_foundation::NSDictionary;
 
     use super::AudioApplication;
+
+    // TIFF→PNG encode is slow per call; cache forever, set is bounded by
+    // installed apps.
+    fn icon_cache() -> &'static Mutex<HashMap<String, Option<String>>> {
+        static CACHE: OnceLock<Mutex<HashMap<String, Option<String>>>> = OnceLock::new();
+        CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+    }
 
     pub fn list_running_applications() -> Vec<AudioApplication> {
         let workspace = NSWorkspace::sharedWorkspace();
@@ -43,15 +51,24 @@ mod macos {
                 continue;
             };
             let name = localized_name(&app).unwrap_or_else(|| bundle_id.clone());
-            // Dedupe — multiple `NSRunningApplication` entries can share a bundle id
-            // (helpers, login items). The user just wants one entry per app.
+            // Helpers / login items share a bundle id with their main app.
             if seen.insert(bundle_id.clone()) {
-                let icon = icon_png_b64(&app);
+                let icon = cached_icon(&bundle_id, &app);
                 out.push(AudioApplication { bundle_id, name, icon });
             }
         }
         out.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
         out
+    }
+
+    fn cached_icon(bundle_id: &str, app: &NSRunningApplication) -> Option<String> {
+        let mut cache = icon_cache().lock().expect("icon cache mutex poisoned");
+        if let Some(cached) = cache.get(bundle_id) {
+            return cached.clone();
+        }
+        let generated = icon_png_b64(app);
+        cache.insert(bundle_id.to_string(), generated.clone());
+        generated
     }
 
     fn bundle_identifier(app: &NSRunningApplication) -> Option<String> {

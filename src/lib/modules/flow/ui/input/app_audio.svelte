@@ -19,7 +19,7 @@
 	async function refresh() {
 		refreshing = true;
 		try {
-			await audioStore.refreshDevices();
+			await audioStore.refreshAudioApplications();
 		} finally {
 			refreshing = false;
 		}

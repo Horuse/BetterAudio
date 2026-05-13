@@ -12,6 +12,7 @@
 use cpal::traits::{DeviceTrait, StreamTrait};
 use cpal::{Sample, SampleFormat, StreamConfig};
 use rtrb::Producer;
+use tracing::error;
 
 use crate::audio::format::{convert_to_stereo, write_stereo_to_output};
 use crate::error::{AppError, AppResult};
@@ -202,7 +203,19 @@ where
             err_cb,
             None,
         )
-        .map_err(|e| AppError::Stream(format!("output build: {e}")))?;
+        .map_err(|e| {
+            let device_name = device.name().unwrap_or_else(|_| "<unknown>".into());
+            error!(
+                device = %device_name,
+                requested_sample_rate = config.sample_rate.0,
+                requested_channels = config.channels,
+                buffer_size = ?config.buffer_size,
+                cpal_error_variant = ?e,
+                cpal_error_display = %e,
+                "build_output_stream failed"
+            );
+            AppError::Stream(format!("output build: {e}"))
+        })?;
     stream
         .play()
         .map_err(|e| AppError::Stream(format!("output play: {e}")))?;

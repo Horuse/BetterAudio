@@ -201,8 +201,8 @@
 					{#each [{ p: displayPeakL, r: displayRmsL, h: holdPeakL }, { p: displayPeakR, r: displayRmsR, h: holdPeakR }] as ch, i (i)}
 						<div class="relative flex-1 {i === 0 ? 'border-r border-neutral-300' : ''}">
 							<div
-								class="absolute inset-0"
-								style="background: {METER_GRADIENT}; filter: brightness(0.2) saturate(0.55);"
+								class="absolute inset-0 opacity-30 dark:brightness-[0.2]"
+								style="background: {METER_GRADIENT};"
 							></div>
 							<div
 								class="absolute right-0 bottom-0 left-0"

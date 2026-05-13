@@ -11,6 +11,7 @@
 	import { onDestroy, onMount, untrack } from 'svelte';
 	import type { NodeKind, Pipeline } from '$lib/modules/pipeline/types';
 	import { pipelineStore } from '$lib/modules/pipeline/stores.svelte';
+	import { audioStore } from '$lib/modules/audio/stores.svelte';
 	import {
 		DND_MIME,
 		defaultDataFor,
@@ -116,6 +117,45 @@
 		return () => clearTimeout(saveTimer);
 	});
 
+	// Auto-restart on routing changes only — effect params flow through
+	// update_effect live, no restart needed.
+	function routingSignature(): string {
+		return JSON.stringify({
+			nodes: nodes.map((n) => ({
+				id: n.id,
+				type: n.type,
+				deviceId: (n.data as Record<string, unknown>).deviceId ?? null,
+				bundleId: (n.data as Record<string, unknown>).bundleId ?? null,
+				filePath: (n.data as Record<string, unknown>).filePath ?? null,
+				excludeCurrentApp: (n.data as Record<string, unknown>).excludeCurrentApp ?? null
+			})),
+			edges: edges.map((e) => ({ id: e.id, source: e.source, target: e.target }))
+		});
+	}
+
+	let lastRoutingSig = untrack(routingSignature);
+	let restartTimer: ReturnType<typeof setTimeout> | undefined;
+	$effect(() => {
+		const sig = routingSignature();
+		if (sig === lastRoutingSig) return;
+		lastRoutingSig = sig;
+		if (!audioStore.isRunning) return;
+		clearTimeout(restartTimer);
+		restartTimer = setTimeout(() => {
+			untrack(async () => {
+				try {
+					await audioStore.restartPipeline({
+						nodes: fromXyNodes(nodes),
+						edges: fromXyEdges(edges)
+					});
+				} catch (e) {
+					audioStore.lastError = e instanceof Error ? e.message : String(e);
+				}
+			});
+		}, 400);
+		return () => clearTimeout(restartTimer);
+	});
+
 	// The Tauri WebView (and historic browser behavior) treats Backspace outside
 	// of editable fields as "navigate back". XYFlow also defaults `deleteKey` to
 	// Backspace, so we explicitly accept Delete too and swallow the default
@@ -137,6 +177,7 @@
 
 	onDestroy(() => {
 		clearTimeout(saveTimer);
+		clearTimeout(restartTimer);
 		if (pipelineStore.editorActions?.getSnapshot === getSnapshot) {
 			pipelineStore.editorActions = null;
 		}

@@ -27,7 +27,7 @@
 	async function refresh() {
 		refreshing = true;
 		try {
-			await audioStore.refreshDevices();
+			await audioStore.refreshInputDevices();
 			await loadGain();
 		} finally {
 			refreshing = false;
