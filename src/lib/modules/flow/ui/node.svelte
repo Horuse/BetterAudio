@@ -18,22 +18,17 @@
 		children
 	}: Props = $props();
 
-	const ACCENT_CLASS: Record<'input' | 'output' | 'effect', string> = {
-		input: 'border-emerald-500/40',
-		output: 'border-sky-500/40',
-		effect: 'border-amber-500/40'
-	};
 </script>
 
 <div
 	class={[
-		'min-w-44 rounded-xl border-2 bg-neutral-200 p-3 shadow-sm',
-		ACCENT_CLASS[accent]
+		'min-w-32 max-w-80 rounded-2xl border border-neutral-400 bg-neutral-200 p-4 shadow-sm',
 	]}
 >
 	<div class="mb-2 text-[10px] font-semibold tracking-wider text-neutral-900 uppercase">
 		{label}
 	</div>
+
 	{@render children?.()}
 
 	{#if hasInput}

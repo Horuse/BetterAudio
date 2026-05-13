@@ -18,14 +18,33 @@
 
 <Wrapper label="Mute" accent="effect" hasInput hasOutput>
 	<button
+		title="Toggle mute (M)"
 		class={[
-			'nodrag nopan w-40 rounded-lg border px-3 py-2 text-sm font-medium transition-colors',
+			'nodrag nopan flex w-40 items-center justify-center gap-2 rounded-lg border px-3 py-2 transition-colors',
 			data.muted
-				? 'border-red-500/40 bg-red-500/40 text-red-100'
-				: 'border-neutral-400 bg-neutral-100 text-neutral-1100 hover:bg-neutral-200'
+				? 'border-red-500/60 bg-red-500/10'
+				: 'border-neutral-400 bg-neutral-100 hover:bg-neutral-200'
 		]}
 		onclick={toggle}
 	>
-		{data.muted ? 'MUTED' : 'Active'}
+		<span
+			class={[
+				'relative flex h-6 w-6 items-center justify-center rounded-full font-mono text-sm font-bold transition-colors',
+				data.muted
+					? 'bg-red-500 text-white shadow-[0_0_8px_rgba(239,68,68,0.7)]'
+					: 'bg-neutral-300 text-neutral-600'
+			]}
+		>
+			M
+			{#if data.muted}
+				<span class="absolute inset-0 animate-ping rounded-full bg-red-500/40"></span>
+			{/if}
+		</span>
+		<span class={[
+			'text-sm font-medium',
+			data.muted ? 'text-red-500' : 'text-neutral-1100'
+		]}>
+			{data.muted ? 'MUTED' : 'Active'}
+		</span>
 	</button>
 </Wrapper>

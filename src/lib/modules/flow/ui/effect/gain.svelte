@@ -15,6 +15,12 @@
 		flow.updateNodeData(id, patch);
 		audioMethods.updateEffect(id, patch).catch(() => {});
 	}
+
+	function valueClass(db: number): string {
+		if (db >= 12) return 'text-red-500';
+		if (db >= 3) return 'text-amber-600';
+		return 'text-emerald-700';
+	}
 </script>
 
 <Wrapper label="Gain" accent="effect" hasInput hasOutput>
@@ -26,8 +32,10 @@
 			max={24}
 			step={0.1}
 			unit=" dB"
+			defaultValue={0}
+			ticks={[-12, -6, 0, 6, 12]}
+			valueClass={valueClass(data.gainDb)}
 			onChange={set}
 		/>
-		<p class="mt-1 text-[10px] text-neutral-900">Symmetric ±24 dB · use Mute for full silence</p>
 	</div>
 </Wrapper>

@@ -165,7 +165,7 @@
 			onpaneclick={closeContextMenu}
 			fitView
 		>
-			<Background />
+			<Background patternClass="fill-neutral-200"/>
 			<Controls />
 		</SvelteFlow>
 	</div>
