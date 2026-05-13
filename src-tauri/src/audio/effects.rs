@@ -3,9 +3,7 @@
 //! Parameters live in `Arc<Atomic*>` cells shared with the UI side of the
 //! engine. The audio callback reads them lock-free on every block, so slider
 //! moves and mute toggles take effect within a couple of milliseconds without
-//! restarting the pipeline. The `EffectControl` returned by `build_chain` is
-//! the handle that owns the same atomics — `apply_update` writes the new
-//! values from JSON sent by the frontend.
+//! restarting the pipeline.
 
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
@@ -13,7 +11,7 @@ use std::sync::Arc;
 use serde_json::Value;
 
 use crate::audio::graph::{
-    ChannelBalanceData, EffectChain, EffectSpec, GainData, LevelMeterData, LimiterData, MuteData,
+    ChannelBalanceData, EffectSpec, GainData, LevelMeterData, LimiterData, MuteData,
 };
 
 pub trait Effect: Send {
@@ -44,9 +42,6 @@ impl RuntimeEffect {
     }
 }
 
-/// UI-side handle to one effect's runtime parameters. Holds the same `Arc`s
-/// as the audio-thread effect instance, so writes here are visible to the
-/// audio callback on the next block.
 #[derive(Clone)]
 pub enum EffectControl {
     Gain {
@@ -67,8 +62,8 @@ pub enum EffectControl {
 }
 
 impl EffectControl {
-    /// Apply a partial update from the frontend. Unknown keys are silently
-    /// ignored so the contract is `apply_update(camelCase frontend payload)`.
+    /// Unknown keys are silently ignored — the frontend pushes the full
+    /// camelCase payload of the node, only some keys map to live controls.
     pub fn apply_update(&self, data: &Value) {
         match self {
             EffectControl::Gain { linear } => {
@@ -120,8 +115,6 @@ fn store_f32(slot: &AtomicU32, v: f32) {
 fn load_f32(slot: &AtomicU32) -> f32 {
     f32::from_bits(slot.load(Ordering::Relaxed))
 }
-
-// ---------- per-effect impls ----------
 
 pub struct GainEffect {
     linear: Arc<AtomicU32>,
@@ -203,10 +196,6 @@ impl Effect for ChannelBalanceEffect {
     }
 }
 
-/// Pass-through analyzer that publishes per-channel peak and RMS levels to a
-/// shared handle. The audio-thread side does only `max`/`store`/RMS math; the
-/// engine's tick thread is responsible for sampling these atomics at ~30 Hz,
-/// emitting Tauri events, and decaying the peak so the UI bar falls smoothly.
 pub struct LevelMeterEffect {
     handle: MeterHandle,
 }
@@ -228,8 +217,7 @@ pub struct MeterSnapshot {
     pub rms_r: f32,
 }
 
-/// Multiplier applied to the peak atomics every tick — gives the bar a
-/// natural "fall-off" so transients don't latch the meter at maximum.
+/// Peak fall-off per tick — prevents transients from latching the meter.
 pub const METER_PEAK_DECAY: f32 = 0.85;
 
 impl MeterHandle {
@@ -305,7 +293,6 @@ impl Effect for LevelMeterEffect {
         let rms_r = (sum_r_sq / frames as f64).sqrt() as f32;
         store_f32(&self.handle.rms_l, rms_l);
         store_f32(&self.handle.rms_r, rms_r);
-        // Samples are passed through unchanged.
     }
 }
 
@@ -352,56 +339,56 @@ impl Effect for LimiterEffect {
     }
 }
 
-// ---------- chain builder ----------
+pub struct EffectBuild {
+    pub effect: RuntimeEffect,
+    pub control: Option<EffectControl>,
+    pub meter: Option<MeterHandle>,
+}
 
-/// Build a runtime effect chain plus parallel lists of:
-/// - `(node_id, control)` for parameter writes from the UI (gain, mute, …)
-/// - `MeterHandle` per LevelMeter for the engine's tick thread to read.
-pub fn build_chain(
-    spec: &EffectChain,
-) -> (
-    Vec<RuntimeEffect>,
-    Vec<(String, EffectControl)>,
-    Vec<MeterHandle>,
-) {
-    let mut effects: Vec<RuntimeEffect> = Vec::with_capacity(spec.0.len());
-    let mut controls: Vec<(String, EffectControl)> = Vec::new();
-    let mut meters: Vec<MeterHandle> = Vec::new();
-
-    for inst in &spec.0 {
-        match inst.spec {
-            EffectSpec::Gain(d) => {
-                let (e, c) = GainEffect::new(d);
-                effects.push(RuntimeEffect::Gain(e));
-                controls.push((inst.node_id.clone(), c));
+pub fn instantiate_effect(spec: &EffectSpec, node_id: &str) -> EffectBuild {
+    match *spec {
+        EffectSpec::Gain(d) => {
+            let (e, c) = GainEffect::new(d);
+            EffectBuild {
+                effect: RuntimeEffect::Gain(e),
+                control: Some(c),
+                meter: None,
             }
-            EffectSpec::Mute(d) => {
-                let (e, c) = MuteEffect::new(d);
-                effects.push(RuntimeEffect::Mute(e));
-                controls.push((inst.node_id.clone(), c));
+        }
+        EffectSpec::Mute(d) => {
+            let (e, c) = MuteEffect::new(d);
+            EffectBuild {
+                effect: RuntimeEffect::Mute(e),
+                control: Some(c),
+                meter: None,
             }
-            EffectSpec::ChannelBalance(d) => {
-                let (e, c) = ChannelBalanceEffect::new(d);
-                effects.push(RuntimeEffect::ChannelBalance(e));
-                controls.push((inst.node_id.clone(), c));
+        }
+        EffectSpec::ChannelBalance(d) => {
+            let (e, c) = ChannelBalanceEffect::new(d);
+            EffectBuild {
+                effect: RuntimeEffect::ChannelBalance(e),
+                control: Some(c),
+                meter: None,
             }
-            EffectSpec::Limiter(d) => {
-                let (e, c) = LimiterEffect::new(d);
-                effects.push(RuntimeEffect::Limiter(e));
-                controls.push((inst.node_id.clone(), c));
+        }
+        EffectSpec::Limiter(d) => {
+            let (e, c) = LimiterEffect::new(d);
+            EffectBuild {
+                effect: RuntimeEffect::Limiter(e),
+                control: Some(c),
+                meter: None,
             }
-            EffectSpec::LevelMeter(d) => {
-                let (e, handle) = LevelMeterEffect::new(d, inst.node_id.clone());
-                effects.push(RuntimeEffect::LevelMeter(e));
-                meters.push(handle);
+        }
+        EffectSpec::LevelMeter(d) => {
+            let (e, handle) = LevelMeterEffect::new(d, node_id.to_string());
+            EffectBuild {
+                effect: RuntimeEffect::LevelMeter(e),
+                control: None,
+                meter: Some(handle),
             }
         }
     }
-
-    (effects, controls, meters)
 }
-
-// ---------- helpers ----------
 
 #[inline]
 fn db_to_linear(db: f32) -> f32 {

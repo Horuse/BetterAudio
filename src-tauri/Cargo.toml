@@ -5,8 +5,6 @@ description = "A Tauri App"
 authors = ["you"]
 edition = "2021"
 
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
-
 [lib]
 # The `_lib` suffix may seem redundant but it is necessary
 # to make the lib name unique and wouldn't conflict with the bin name.
@@ -16,6 +14,18 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
+
+# rubato's sinc resampler is unusable in dev without optimisation — a single
+# 1024-frame block takes ~16 ms vs ~500 µs at -O3, so the DSP worker can't
+# keep real time and input rings overflow. Optimise just the resampler stack;
+# leaving the rest of the workspace (tauri, web stack, our crate) at -O0
+# keeps clean builds fast.
+[profile.dev.package.rubato]
+opt-level = 3
+[profile.dev.package.realfft]
+opt-level = 3
+[profile.dev.package.rustfft]
+opt-level = 3
 
 [dependencies]
 tauri = { version = "2", features = [] }

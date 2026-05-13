@@ -4,7 +4,6 @@ use serde::Deserialize;
 
 use crate::error::{AppError, AppResult};
 
-/// Payload received from the frontend. Mirrors `pipeline/types.ts`.
 #[derive(Debug, Deserialize)]
 pub struct GraphSpec {
     pub nodes: Vec<NodeSpec>,
@@ -61,8 +60,6 @@ pub enum NodeCategory {
     Output,
     Effect,
 }
-
-// Per-kind typed data (snake_case after camelCase conversion via serde rename).
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -128,7 +125,6 @@ pub struct LimiterData {
 #[serde(rename_all = "camelCase", default)]
 pub struct LevelMeterData {}
 
-/// Typed input variant after validation.
 #[derive(Debug, Clone)]
 pub enum InputSpec {
     Microphone { device_id: String },
@@ -136,14 +132,12 @@ pub enum InputSpec {
     AppAudio { bundle_id: String },
 }
 
-/// Typed output variant after validation.
 #[derive(Debug, Clone)]
 pub enum OutputSpec {
     Speaker { device_id: String },
     FileRecording { file_path: String },
 }
 
-/// Typed effect variant after validation. Effects are 1→1.
 #[derive(Debug, Clone)]
 pub enum EffectSpec {
     Gain(GainData),
@@ -152,19 +146,6 @@ pub enum EffectSpec {
     Limiter(LimiterData),
     LevelMeter(LevelMeterData),
 }
-
-/// One effect occurrence in a chain: keeps the originating node id so live
-/// parameter updates from the UI can be routed back to the right runtime
-/// effect instance.
-#[derive(Debug, Clone)]
-pub struct EffectInstance {
-    pub node_id: String,
-    pub spec: EffectSpec,
-}
-
-/// A linear chain of effects between an input and an output. Order is from input → output.
-#[derive(Debug, Clone)]
-pub struct EffectChain(pub Vec<EffectInstance>);
 
 #[derive(Debug, Clone)]
 pub struct ValidInput {
@@ -178,37 +159,41 @@ pub struct ValidOutput {
     pub spec: OutputSpec,
 }
 
-/// One realized routing: a single input node feeds a single output node through
-/// the linear chain of effects between them. Multiple bridges may share the
-/// same input or the same output (mixing happens at the output).
 #[derive(Debug, Clone)]
-pub struct Bridge {
-    pub input_id: String,
-    pub output_id: String,
-    pub effects: EffectChain,
+pub struct ValidEffect {
+    pub id: String,
+    pub spec: EffectSpec,
 }
 
+#[derive(Debug, Clone)]
+pub struct ValidEdge {
+    pub from: String,
+    pub to: String,
+}
+
+/// Validated DAG. Effects may have multiple incoming edges (mixer-bus
+/// behaviour), at most one outgoing edge. Inputs may fan out to many
+/// downstream nodes. The engine assembles a per-output sub-graph from these
+/// fields at start time.
 #[derive(Debug)]
 pub struct ValidGraph {
     pub inputs: Vec<ValidInput>,
     pub outputs: Vec<ValidOutput>,
-    pub bridges: Vec<Bridge>,
+    pub effects: Vec<ValidEffect>,
+    pub edges: Vec<ValidEdge>,
 }
 
 impl GraphSpec {
-    /// Validate the graph and resolve typed inputs/outputs/bridges.
-    ///
     /// Rules:
-    /// - Any number of inputs and outputs are allowed.
-    /// - Disconnected inputs/outputs (no path to/from anything) are dropped, not rejected.
-    /// - Effects must have at most one incoming and at most one outgoing edge (1→1).
-    ///   Disconnected effects are simply dropped.
+    /// - Inputs may fan out to many downstream nodes; if none, they're dropped.
+    /// - Outputs may receive many incoming edges (mixed at the output).
+    /// - Effects may have ≥1 incoming (act as a mixer-bus) and ≤1 outgoing.
+    /// - Anything not on a path from some input to some output is dropped.
     /// - Cycles are rejected.
     pub fn validate(&self) -> AppResult<ValidGraph> {
         let nodes_by_id: HashMap<&str, &NodeSpec> =
             self.nodes.iter().map(|n| (n.id.as_str(), n)).collect();
 
-        // Build adjacency: outgoing and incoming.
         let mut outgoing: HashMap<&str, Vec<&str>> = HashMap::new();
         let mut incoming: HashMap<&str, Vec<&str>> = HashMap::new();
         for edge in &self.edges {
@@ -220,6 +205,24 @@ impl GraphSpec {
                     edge.id
                 )));
             }
+            // Edges into an input node make no sense — fail loudly.
+            if let Some(n) = nodes_by_id.get(edge.target.as_str()) {
+                if n.kind.category() == NodeCategory::Input {
+                    return Err(AppError::Validation(format!(
+                        "edge points into input node {:?}",
+                        n.id
+                    )));
+                }
+            }
+            // Edges out of an output node likewise.
+            if let Some(n) = nodes_by_id.get(edge.source.as_str()) {
+                if n.kind.category() == NodeCategory::Output {
+                    return Err(AppError::Validation(format!(
+                        "edge starts from output node {:?}",
+                        n.id
+                    )));
+                }
+            }
             outgoing
                 .entry(edge.source.as_str())
                 .or_default()
@@ -230,74 +233,58 @@ impl GraphSpec {
                 .push(edge.source.as_str());
         }
 
-        // Effects are 1→1: enforce.
+        // Effects must have ≤1 outgoing (no sends yet — would require per-output
+        // duplication of the effect instance). Multi-incoming is fine.
         for n in &self.nodes {
             if n.kind.category() != NodeCategory::Effect {
                 continue;
             }
-            let inc = incoming.get(n.id.as_str()).map(Vec::len).unwrap_or(0);
             let out = outgoing.get(n.id.as_str()).map(Vec::len).unwrap_or(0);
-            if inc > 1 {
-                return Err(AppError::Validation(format!(
-                    "effect {:?} has multiple incoming edges (must be 1→1)",
-                    n.kind
-                )));
-            }
             if out > 1 {
                 return Err(AppError::Validation(format!(
-                    "effect {:?} has multiple outgoing edges (must be 1→1)",
-                    n.kind
+                    "effect {:?} has {} outgoing edges (sends not yet supported)",
+                    n.kind, out
                 )));
             }
         }
 
         check_acyclic(&self.nodes, &outgoing)?;
 
-        // Resolve typed inputs & outputs that actually have connectivity.
-        let inputs = self.resolve_inputs(&outgoing)?;
-        let outputs = self.resolve_outputs(&incoming)?;
+        // Bidirectional reachability: a node survives only if it's on some
+        // path input→output.
+        let reachable_from_inputs = bfs_forward(&self.nodes, &outgoing, NodeCategory::Input);
+        let reachable_from_outputs = bfs_backward(&self.nodes, &incoming, NodeCategory::Output);
+        let keep: HashSet<&str> = reachable_from_inputs
+            .intersection(&reachable_from_outputs)
+            .copied()
+            .collect();
 
-        // Build bridges: walk forward from each input through 1→1 effect chains
-        // until reaching an output (or dead-end). Drop dead-ends silently.
-        let mut bridges = Vec::new();
-        for input in &inputs {
-            walk_forward(
-                input.id.as_str(),
-                &nodes_by_id,
-                &outgoing,
-                &mut Vec::new(),
-                &mut bridges,
-            )?;
-        }
+        let inputs = self.resolve_inputs(&keep)?;
+        let outputs = self.resolve_outputs(&keep)?;
+        let effects = self.resolve_effects(&keep)?;
 
-        // Bridges may target outputs we kept; verify each bridge end is one of our outputs.
-        let output_ids: HashSet<&str> = outputs.iter().map(|o| o.id.as_str()).collect();
-        bridges.retain(|b| output_ids.contains(b.output_id.as_str()));
-
-        // Sanity: if user has inputs + outputs but no bridges connect them, that's just
-        // "nothing to do" — we don't error, we let the user keep building. The engine
-        // will start with whatever bridges exist (potentially zero).
+        let edges: Vec<ValidEdge> = self
+            .edges
+            .iter()
+            .filter(|e| keep.contains(e.source.as_str()) && keep.contains(e.target.as_str()))
+            .map(|e| ValidEdge {
+                from: e.source.clone(),
+                to: e.target.clone(),
+            })
+            .collect();
 
         Ok(ValidGraph {
             inputs,
             outputs,
-            bridges,
+            effects,
+            edges,
         })
     }
 
-    fn resolve_inputs(
-        &self,
-        outgoing: &HashMap<&str, Vec<&str>>,
-    ) -> AppResult<Vec<ValidInput>> {
+    fn resolve_inputs(&self, keep: &HashSet<&str>) -> AppResult<Vec<ValidInput>> {
         let mut result = Vec::new();
         for n in &self.nodes {
-            if n.kind.category() != NodeCategory::Input {
-                continue;
-            }
-            // Drop fully disconnected inputs — not an error.
-            if outgoing.get(n.id.as_str()).map(Vec::is_empty).unwrap_or(true)
-                && !outgoing.contains_key(n.id.as_str())
-            {
+            if n.kind.category() != NodeCategory::Input || !keep.contains(n.id.as_str()) {
                 continue;
             }
             let spec = match n.kind {
@@ -333,18 +320,10 @@ impl GraphSpec {
         Ok(result)
     }
 
-    fn resolve_outputs(
-        &self,
-        incoming: &HashMap<&str, Vec<&str>>,
-    ) -> AppResult<Vec<ValidOutput>> {
+    fn resolve_outputs(&self, keep: &HashSet<&str>) -> AppResult<Vec<ValidOutput>> {
         let mut result = Vec::new();
         for n in &self.nodes {
-            if n.kind.category() != NodeCategory::Output {
-                continue;
-            }
-            if incoming.get(n.id.as_str()).map(Vec::is_empty).unwrap_or(true)
-                && !incoming.contains_key(n.id.as_str())
-            {
+            if n.kind.category() != NodeCategory::Output || !keep.contains(n.id.as_str()) {
                 continue;
             }
             let spec = match n.kind {
@@ -373,71 +352,68 @@ impl GraphSpec {
         }
         Ok(result)
     }
+
+    fn resolve_effects(&self, keep: &HashSet<&str>) -> AppResult<Vec<ValidEffect>> {
+        let mut result = Vec::new();
+        for n in &self.nodes {
+            if n.kind.category() != NodeCategory::Effect || !keep.contains(n.id.as_str()) {
+                continue;
+            }
+            result.push(ValidEffect {
+                id: n.id.clone(),
+                spec: effect_from_node(n)?,
+            });
+        }
+        Ok(result)
+    }
 }
 
-/// DFS forward from `current`, collecting effects, terminating at output nodes.
-fn walk_forward<'a>(
-    current: &'a str,
-    nodes_by_id: &HashMap<&'a str, &'a NodeSpec>,
+fn bfs_forward<'a>(
+    nodes: &'a [NodeSpec],
     outgoing: &HashMap<&'a str, Vec<&'a str>>,
-    chain: &mut Vec<EffectInstance>,
-    out: &mut Vec<Bridge>,
-) -> AppResult<()> {
-    let kids = match outgoing.get(current) {
-        Some(v) => v,
-        None => return Ok(()),
-    };
-    for &child in kids {
-        let child_node = nodes_by_id[child];
-        match child_node.kind.category() {
-            NodeCategory::Output => {
-                out.push(Bridge {
-                    input_id: find_chain_root(current, nodes_by_id, outgoing).to_string(),
-                    output_id: child.to_string(),
-                    effects: EffectChain(chain.clone()),
-                });
-            }
-            NodeCategory::Effect => {
-                let spec = effect_from_node(child_node)?;
-                chain.push(EffectInstance {
-                    node_id: child.to_string(),
-                    spec,
-                });
-                walk_forward(child, nodes_by_id, outgoing, chain, out)?;
-                chain.pop();
-            }
-            NodeCategory::Input => {
-                return Err(AppError::Validation(format!(
-                    "edge points into an input node: {}",
-                    child_node.id
-                )));
+    start_category: NodeCategory,
+) -> HashSet<&'a str> {
+    let mut seen = HashSet::new();
+    let mut stack: Vec<&str> = nodes
+        .iter()
+        .filter(|n| n.kind.category() == start_category)
+        .map(|n| n.id.as_str())
+        .collect();
+    while let Some(cur) = stack.pop() {
+        if !seen.insert(cur) {
+            continue;
+        }
+        if let Some(kids) = outgoing.get(cur) {
+            for &k in kids {
+                stack.push(k);
             }
         }
     }
-    Ok(())
+    seen
 }
 
-/// Walk back through 1→1 effects to find the input node that started this path.
-/// `from` must be reachable backwards-uniquely from an input (effects are 1→1).
-fn find_chain_root<'a>(
-    from: &'a str,
-    nodes_by_id: &HashMap<&'a str, &'a NodeSpec>,
-    outgoing: &HashMap<&'a str, Vec<&'a str>>,
-) -> &'a str {
-    let mut incoming: HashMap<&'a str, &'a str> = HashMap::new();
-    for (&src, targets) in outgoing {
-        for &t in targets {
-            incoming.insert(t, src);
+fn bfs_backward<'a>(
+    nodes: &'a [NodeSpec],
+    incoming: &HashMap<&'a str, Vec<&'a str>>,
+    start_category: NodeCategory,
+) -> HashSet<&'a str> {
+    let mut seen = HashSet::new();
+    let mut stack: Vec<&str> = nodes
+        .iter()
+        .filter(|n| n.kind.category() == start_category)
+        .map(|n| n.id.as_str())
+        .collect();
+    while let Some(cur) = stack.pop() {
+        if !seen.insert(cur) {
+            continue;
+        }
+        if let Some(parents) = incoming.get(cur) {
+            for &p in parents {
+                stack.push(p);
+            }
         }
     }
-    let mut cur: &'a str = from;
-    while let Some(&prev) = incoming.get(cur) {
-        if nodes_by_id[prev].kind.category() == NodeCategory::Input {
-            return prev;
-        }
-        cur = prev;
-    }
-    from
+    seen
 }
 
 fn effect_from_node(n: &NodeSpec) -> AppResult<EffectSpec> {

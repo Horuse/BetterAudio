@@ -1,3 +1,4 @@
+pub mod clock;
 pub mod device;
 pub mod effects;
 pub mod engine;

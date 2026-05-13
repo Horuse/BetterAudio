@@ -10,9 +10,11 @@
 
 use std::ffi::{c_void, CString};
 use std::os::raw::c_char;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 
 use rtrb::Producer;
+use tracing::info;
 
 use crate::error::{AppError, AppResult};
 
@@ -83,22 +85,23 @@ extern "C" {
     fn ba_sck_stop(handle: *mut c_void);
 }
 
-/// RAII handle owning the live SCStream + ring producer state.
 pub struct SckCapture {
     handle: *mut c_void,
-    /// Heap-allocated state passed as `user_data` to the Swift callback. Lives
-    /// at least until Drop stops the stream, at which point Swift has
-    /// guaranteed no further callbacks will fire.
+    /// Kept alive for Drop order: `ba_sck_stop` guarantees no more callbacks
+    /// before the box is dropped.
     _state: Box<CallbackState>,
 }
 
 unsafe impl Send for SckCapture {}
 
 struct CallbackState {
+    label: String,
     /// One producer per bridge that subscribes to this SCK source. Wrapped in
     /// `Mutex` only because rtrb's `Producer<f32>` is `!Sync` — SCK delivers
     /// buffers on a serial dispatch queue, so the mutex is uncontended.
     producers: Mutex<Vec<Producer<f32>>>,
+    /// One-shot log so we can confirm SCK actually fires for this source.
+    first_call_logged: AtomicBool,
 }
 
 extern "C" fn sample_trampoline(
@@ -111,6 +114,14 @@ extern "C" fn sample_trampoline(
         return;
     }
     let state = unsafe { &*(user_data as *const CallbackState) };
+    if !state.first_call_logged.swap(true, Ordering::Relaxed) {
+        info!(
+            label = %state.label,
+            frames,
+            channels,
+            "SCK: first audio buffer delivered"
+        );
+    }
     let n = (frames as usize) * (channels as usize);
     let slice = unsafe { std::slice::from_raw_parts(samples, n) };
     let Ok(mut producers) = state.producers.lock() else {
@@ -122,8 +133,6 @@ extern "C" fn sample_trampoline(
 }
 
 impl SckCapture {
-    /// Start capturing audio from one application (by bundle identifier),
-    /// fanning out the captured samples to every supplied producer ring.
     pub fn start_app(
         bundle_id: &str,
         sample_rate: u32,
@@ -136,7 +145,9 @@ impl SckCapture {
         }
 
         let state = Box::new(CallbackState {
+            label: format!("app:{bundle_id}"),
             producers: Mutex::new(producers),
+            first_call_logged: AtomicBool::new(false),
         });
         let state_ptr = state.as_ref() as *const CallbackState as *mut c_void;
 
@@ -180,7 +191,9 @@ impl SckCapture {
         }
 
         let state = Box::new(CallbackState {
+            label: "system".to_string(),
             producers: Mutex::new(producers),
+            first_call_logged: AtomicBool::new(false),
         });
         let state_ptr = state.as_ref() as *const CallbackState as *mut c_void;
 

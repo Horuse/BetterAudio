@@ -1,10 +1,4 @@
 //! High-quality sinc-based resampler for stereo f32 streams.
-//!
-//! Wraps `rubato::SincFixedIn` for fixed-chunk-size input. The caller is
-//! responsible for feeding exactly `chunk_size` frames at a time; the resampler
-//! emits a variable (but bounded) number of output frames per call.
-//!
-//! All buffers are pre-allocated. `process_chunk` does not allocate.
 
 use rubato::{
     Resampler, SincFixedIn, SincInterpolationParameters, SincInterpolationType, WindowFunction,
@@ -21,8 +15,6 @@ pub struct StereoResampler {
 }
 
 impl StereoResampler {
-    /// Build a resampler converting from `from_rate` Hz to `to_rate` Hz.
-    /// `chunk_size` is the number of input frames fed per `process_chunk` call.
     pub fn new(from_rate: u32, to_rate: u32, chunk_size: usize) -> AppResult<Self> {
         let ratio = to_rate as f64 / from_rate as f64;
         let params = SincInterpolationParameters {
@@ -55,28 +47,28 @@ impl StereoResampler {
         self.out_max
     }
 
-    /// Process one fixed-size chunk of interleaved stereo input. Appends
-    /// produced frames (interleaved stereo) to `dst`.
     pub fn process_chunk(&mut self, interleaved_in: &[f32], dst: &mut Vec<f32>) -> AppResult<()> {
         debug_assert_eq!(interleaved_in.len(), self.chunk_in * 2);
 
-        // Deinterleave into planar input buffers.
         for (i, frame) in interleaved_in.chunks_exact(2).enumerate() {
             self.in_planar[0][i] = frame[0];
             self.in_planar[1][i] = frame[1];
         }
 
-        // Ensure output buffers can hold at least out_max frames without realloc.
+        // Rubato 0.16 writes INTO existing slots (`AsMut<[T]>`) and uses
+        // `len()` to know the available space. Reserving capacity isn't enough
+        // — we must resize so `len >= out_max`.
         for v in &mut self.out_planar {
-            v.clear();
-            v.reserve(self.out_max);
+            v.resize(self.out_max, 0.0);
         }
 
-        self.inner
+        let (_in_used, produced) = self
+            .inner
             .process_into_buffer(&self.in_planar, &mut self.out_planar, None)
             .map_err(|e| AppError::Stream(format!("resampler process: {e}")))?;
 
-        let produced = self.out_planar[0].len();
+        // `produced` is the number of valid output frames per channel; the rest
+        // of out_planar may be unwritten zero-padding.
         for i in 0..produced {
             dst.push(self.out_planar[0][i]);
             dst.push(self.out_planar[1][i]);

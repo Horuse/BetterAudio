@@ -1,32 +1,34 @@
-//! Build and run a multi-input / multi-output pipeline.
+//! Build and run a multi-input / multi-output audio pipeline as a DAG.
 //!
-//! Each input is connected to N outputs via per-pair SPSC ring buffers carrying
-//! interleaved stereo f32 at the **input device's** sample rate. The output side
-//! resamples to the output device's rate (or the file recorder's fixed rate),
-//! applies the per-bridge effect chain, and sums all bridges into the device or
-//! file.
-//!
-//! Threads:
-//! - One cpal input callback per input device (RT thread, broadcasts to N rings).
-//! - One cpal output callback per Speaker output (RT thread, mixes + DSP).
-//! - One worker thread per File Recording output (drains rings, mixes, writes).
+//! Layout:
+//! - Each input has one cpal/SCK callback that writes to N SPSC rings (one
+//!   per output that consumes this input), at the input device's native SR.
+//! - Each output owns an `OutputGraph` — a topologically-sorted sub-DAG of
+//!   sources + effects reachable backward from that output. A `DspWorker`
+//!   thread mixes one block per real-time deadline and hands it off to:
+//!     * Speaker: a stereo SPSC ring that the cpal output callback drains.
+//!     * File: a `hound::WavWriter`.
+//! - Effects with multiple incoming edges act as mixer-buses (sum first,
+//!   then apply DSP). Effects are constrained to at most one outgoing edge
+//!   in the validator.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use rtrb::{Consumer, Producer, RingBuffer};
 use serde_json::json;
 use tauri::{AppHandle, Emitter};
 use tracing::{info, warn};
 
+use crate::audio::clock::{ClockSource, SystemClockTicker};
 use crate::audio::device::{self, DeviceKind};
-use crate::audio::effects::{build_chain, EffectControl, MeterHandle, RuntimeEffect};
+use crate::audio::effects::{instantiate_effect, EffectControl, MeterHandle, RuntimeEffect};
 use crate::audio::graph::{
-    EffectChain, InputSpec, OutputSpec, ValidGraph, ValidInput, ValidOutput,
+    InputSpec, OutputSpec, ValidGraph, ValidInput, ValidOutput,
 };
 use crate::audio::recorder::WavRecorder;
 use crate::audio::resample::StereoResampler;
@@ -37,9 +39,11 @@ const STATE_EVENT: &str = "audio://state";
 const METER_EVENT: &str = "audio://meter";
 const METER_TICK: Duration = Duration::from_millis(33);
 
-/// Ring buffer length (in stereo f32 samples) per bridge. Chosen to absorb
-/// ~250 ms of jitter at 48 kHz stereo (~24 000 samples) — plenty of headroom.
-const RING_CAPACITY: usize = 24_000;
+/// Ring buffer length (in stereo f32 samples) per bridge. Sized for ~500 ms
+/// of stereo audio at 96 kHz so the worker can ride out longer source pauses
+/// (SCK silent gaps, scheduler hiccups) without overflowing the FAST source's
+/// ring while waiting on a SLOW one.
+const RING_CAPACITY: usize = 96_000;
 
 /// Block size used by the resampler. 256 frames @ 48 kHz ≈ 5.3 ms.
 const RESAMPLE_CHUNK: usize = 256;
@@ -49,14 +53,9 @@ const RESAMPLE_CHUNK: usize = 256;
 /// rate to avoid lossy downsampling.
 const RECORDER_DEFAULT_SR: u32 = 48_000;
 
-/// File recorder worker loop pacing.
-const RECORDER_POLL: Duration = Duration::from_millis(5);
-
-/// Owned handles to every resource a started pipeline holds. `Drop` stops all
-/// streams and joins the file recorder workers (in order).
 pub struct ActivePipeline {
     _input_streams: Vec<InputHandle>,
-    _speaker_streams: Vec<cpal::Stream>,
+    _speaker_streams: Vec<SpeakerHandle>,
     _workers: Vec<RecorderWorker>,
     /// node_id → live control handle. Each effect is 1→1 in the graph, so a
     /// node id corresponds to at most one runtime effect instance.
@@ -67,8 +66,6 @@ pub struct ActivePipeline {
     _meter_thread: Option<MeterTickThread>,
 }
 
-/// Periodically polls every meter's atomics and emits one Tauri event per
-/// meter so the UI can draw bars. Stops cleanly on drop.
 struct MeterTickThread {
     stop: Arc<AtomicBool>,
     join: Option<JoinHandle<()>>,
@@ -119,10 +116,8 @@ impl Drop for RecorderWorker {
     }
 }
 
-/// Fixed-capacity ring buffer used as the output-side staging FIFO. Unlike
-/// `VecDeque`, this guarantees zero allocations after construction — the RT
-/// output callback path cannot trigger a realloc no matter how transients
-/// stack up. Overrun is a debug-only panic.
+/// Fixed-capacity ring used as a staging FIFO. Allocates once, no reallocs.
+/// Debug-assert on overrun keeps capacity sizing honest.
 struct StagingRing {
     buf: Box<[f32]>,
     head: usize,
@@ -145,15 +140,15 @@ impl StagingRing {
         self.len
     }
 
-    #[inline]
-    fn pop(&mut self) -> Option<f32> {
-        if self.len == 0 {
-            return None;
+    fn pop_into(&mut self, dst: &mut [f32]) -> usize {
+        let n = dst.len().min(self.len);
+        let cap = self.buf.len();
+        for slot in dst.iter_mut().take(n) {
+            *slot = self.buf[self.head];
+            self.head = if self.head + 1 == cap { 0 } else { self.head + 1 };
         }
-        let v = self.buf[self.head];
-        self.head = (self.head + 1) % self.buf.len();
-        self.len -= 1;
-        Some(v)
+        self.len -= n;
+        n
     }
 
     fn extend_from_slice(&mut self, src: &[f32]) {
@@ -173,143 +168,243 @@ impl StagingRing {
     }
 }
 
-/// Per (input, output) bridge state on the consumer side.
-struct BridgeConsumer {
-    consumer: Consumer<f32>,
-    /// `None` when input SR == output SR. Resampling is skipped entirely.
-    resampler: Option<StereoResampler>,
-    /// Holds incoming samples (input SR) until we have a full resampler chunk.
-    input_staging: Vec<f32>,
-    /// Resampled-then-effected stereo samples (output SR) waiting to be mixed
-    /// into the device or file block. Allocation-free in RT.
-    output_staging: StagingRing,
-    effects: Vec<RuntimeEffect>,
-    /// Scratch buffer for resampler output / pass-through chunks. Reused.
-    chunk_tmp: Vec<f32>,
+/// One node in an output's DAG. `Source` reads from a ring + resamples,
+/// `Effect` sums its upstreams' buffers and runs DSP. Both expose a stereo
+/// `out_buf` of `DSP_BLOCK_FRAMES * 2` samples that downstream nodes consume.
+enum DagNode {
+    Source(SourceState),
+    Effect(EffectState),
 }
 
-impl BridgeConsumer {
-    fn new(
-        consumer: Consumer<f32>,
-        input_sr: u32,
-        output_sr: u32,
-        effects: &EffectChain,
-    ) -> AppResult<(Self, Vec<(String, EffectControl)>, Vec<MeterHandle>)> {
-        let resampler = if input_sr == output_sr {
-            None
-        } else {
-            Some(StereoResampler::new(input_sr, output_sr, RESAMPLE_CHUNK)?)
-        };
-        let out_max = resampler.as_ref().map(|r| r.out_max()).unwrap_or(RESAMPLE_CHUNK);
-        let (chain, controls, meters) = build_chain(effects);
-        // out_max is per-chunk frames; one chunk produces `out_max * 2`
-        // interleaved samples. `* 4` headroom covers (a) one full produced
-        // chunk waiting before drain, (b) a second one pushed before the
-        // consumer wakes, and (c) odd interleave alignment. With out_max ~512
-        // (worst-case 96→48k ratio) this is ~16 KB — cheap for the safety.
-        let staging_capacity = out_max * 4;
-        Ok((
-            Self {
-                consumer,
-                resampler,
-                input_staging: Vec::with_capacity(RESAMPLE_CHUNK * 2 + 8),
-                output_staging: StagingRing::with_capacity(staging_capacity),
-                effects: chain,
-                chunk_tmp: Vec::with_capacity(out_max * 2),
-            },
-            controls,
-            meters,
-        ))
+impl DagNode {
+    fn out_buf(&self) -> &[f32] {
+        match self {
+            DagNode::Source(s) => &s.out_buf,
+            DagNode::Effect(e) => &e.out_buf,
+        }
+    }
+}
+
+struct SourceState {
+    /// Human-friendly id used only in the one-shot startup log.
+    label: String,
+    consumer: Consumer<f32>,
+    /// `None` when input SR == output SR.
+    resampler: Option<StereoResampler>,
+    /// Samples pulled from the ring waiting to feed the resampler.
+    input_staging: Vec<f32>,
+    /// Resampled samples waiting to be drained into `out_buf`.
+    out_pending: StagingRing,
+    /// Per-block scratch — receives one resampler chunk before going into staging.
+    chunk_tmp: Vec<f32>,
+    /// Current block (length = DSP_BLOCK_FRAMES * 2).
+    out_buf: Vec<f32>,
+    /// Input-side (raw input-SR, stereo) sample count needed to produce one
+    /// full output block. Used by the availability-pacing worker to know when
+    /// this source has enough buffered audio to safely contribute a block.
+    input_samples_per_block: usize,
+    /// Wall-time of the most recent successful pop. Used to detect "silent"
+    /// sources — if no samples have flowed for `STALL_THRESHOLD`, the worker
+    /// stops waiting on this source so the OTHER sources don't end up with
+    /// their rings overflowing while we hang on a dead one.
+    last_pop_at: Instant,
+    /// One-shot startup log so we can confirm samples actually start flowing.
+    first_data_logged: bool,
+}
+
+/// How long a source can go without delivering before the availability-paced
+/// worker stops waiting on it. SCK in normal operation delivers every ~20 ms,
+/// so 150 ms is ~7× headroom — enough to avoid false positives on bursty
+/// delivery, short enough that a real stall doesn't drown the FAST source's
+/// ring buffer.
+const STALL_THRESHOLD: Duration = Duration::from_millis(150);
+
+impl SourceState {
+    fn is_stalled(&self) -> bool {
+        self.last_pop_at.elapsed() > STALL_THRESHOLD
     }
 
-    /// Pull one frame (L,R) from the staging FIFO, refilling from the input
-    /// ring if necessary. Returns [0,0] on underrun.
-    #[inline]
-    fn pop_frame(&mut self) -> [f32; 2] {
-        if self.output_staging.len() < 2 {
-            self.try_refill_one_chunk();
+    /// True when the source can fill one output block without underrun, OR
+    /// when it's been silent long enough that we should stop waiting on it.
+    /// A stalled source contributes silence to the mix (fill_block zero-fills
+    /// the part it can't supply).
+    fn is_ready_for_block(&self) -> bool {
+        if self.is_stalled() {
+            return true;
         }
-        let l = self.output_staging.pop().unwrap_or(0.0);
-        let r = self.output_staging.pop().unwrap_or(0.0);
-        [l, r]
+        let have = self.consumer.slots() + self.input_staging.len();
+        have >= self.input_samples_per_block
+    }
+}
+
+impl SourceState {
+    fn fill_block(&mut self) {
+        let need = self.out_buf.len();
+        let mut written = self.out_pending.pop_into(&mut self.out_buf[..]);
+        while written < need {
+            self.try_refill_one_chunk();
+            if self.out_pending.len() == 0 {
+                // Ring empty too — zero-fill the rest (real underrun).
+                for s in &mut self.out_buf[written..] {
+                    *s = 0.0;
+                }
+                return;
+            }
+            let n = self.out_pending.pop_into(&mut self.out_buf[written..]);
+            written += n;
+        }
     }
 
     fn try_refill_one_chunk(&mut self) {
         if let Some(rs) = &mut self.resampler {
             let needed = rs.chunk_in() * 2;
-            while self.input_staging.len() < needed {
-                match self.consumer.pop() {
-                    Ok(s) => self.input_staging.push(s),
-                    Err(_) => return,
+            // Bulk read what we still need (one rtrb reservation instead of
+            // one atomic op per sample — RT-friendly).
+            let want = needed - self.input_staging.len();
+            let avail = self.consumer.slots().min(want);
+            if avail > 0 {
+                if let Ok(chunk) = self.consumer.read_chunk(avail) {
+                    let (first, second) = chunk.as_slices();
+                    self.input_staging.extend_from_slice(first);
+                    self.input_staging.extend_from_slice(second);
+                    chunk.commit_all();
+                    self.last_pop_at = Instant::now();
                 }
             }
+            if self.input_staging.len() < needed {
+                return; // wait for more data on next call
+            }
             self.chunk_tmp.clear();
-            if rs
-                .process_chunk(&self.input_staging[..needed], &mut self.chunk_tmp)
-                .is_err()
+            if let Err(e) =
+                rs.process_chunk(&self.input_staging[..needed], &mut self.chunk_tmp)
             {
+                warn!(source = %self.label, error = %e, "resampler chunk failed");
                 self.input_staging.drain(..needed);
                 return;
             }
             self.input_staging.drain(..needed);
         } else {
-            // Pass-through path: no SR conversion.
             self.chunk_tmp.clear();
-            for _ in 0..(RESAMPLE_CHUNK * 2) {
-                match self.consumer.pop() {
-                    Ok(s) => self.chunk_tmp.push(s),
-                    Err(_) => break,
+            let want = RESAMPLE_CHUNK * 2;
+            let avail = self.consumer.slots().min(want);
+            if avail > 0 {
+                if let Ok(chunk) = self.consumer.read_chunk(avail) {
+                    let (first, second) = chunk.as_slices();
+                    self.chunk_tmp.extend_from_slice(first);
+                    self.chunk_tmp.extend_from_slice(second);
+                    chunk.commit_all();
+                    self.last_pop_at = Instant::now();
                 }
             }
         }
+        // Even-count guarantee (don't half a frame).
         let frames = self.chunk_tmp.len() / 2;
-        if frames == 0 {
-            return;
-        }
-        // Truncate any odd-sample tail (orphan L without R) before effects/mix.
         self.chunk_tmp.truncate(frames * 2);
-        for eff in &mut self.effects {
-            eff.process(&mut self.chunk_tmp, frames);
+        if !self.chunk_tmp.is_empty() {
+            if !self.first_data_logged {
+                info!(source = %self.label, "source online");
+                self.first_data_logged = true;
+            }
+            self.out_pending.extend_from_slice(&self.chunk_tmp);
         }
-        self.output_staging.extend_from_slice(&self.chunk_tmp);
+    }
+}
+
+struct EffectState {
+    effect: RuntimeEffect,
+    /// Indices into the parent `OutputGraph::nodes` of upstream nodes whose
+    /// out_bufs are summed into this effect's `out_buf` before DSP. Topo sort
+    /// guarantees every entry is < this effect's own index.
+    incoming: Vec<usize>,
+    out_buf: Vec<f32>,
+}
+
+/// Per-output DAG runtime: sources + effects in topological order plus the
+/// indices of terminal nodes whose buffers get summed into the final output.
+struct OutputGraph {
+    /// Reserved for drift-correction; not yet consumed.
+    #[allow(dead_code)]
+    sample_rate: u32,
+    nodes: Vec<DagNode>,
+    terminal_indices: Vec<usize>,
+}
+
+impl OutputGraph {
+    /// True if every source has enough buffered input to produce one full
+    /// output block without underrun. Availability-paced workers use this to
+    /// gate block production.
+    fn all_sources_ready(&self) -> bool {
+        for node in &self.nodes {
+            if let DagNode::Source(s) = node {
+                if !s.is_ready_for_block() {
+                    return false;
+                }
+            }
+        }
+        true
+    }
+
+    /// Fill `output` (must be `DSP_BLOCK_FRAMES * 2` long) with one block of
+    /// mixed audio at `sample_rate`.
+    fn process_block(&mut self, output: &mut [f32]) {
+        for node in &mut self.nodes {
+            if let DagNode::Source(s) = node {
+                s.fill_block();
+            }
+        }
+        // `split_at_mut` gives mutable access to effect `i` while keeping
+        // immutable access to its upstreams (all at indices < i by topo sort).
+        for i in 0..self.nodes.len() {
+            let (head, tail) = self.nodes.split_at_mut(i);
+            if let DagNode::Effect(eff) = &mut tail[0] {
+                for s in eff.out_buf.iter_mut() {
+                    *s = 0.0;
+                }
+                for &idx in &eff.incoming {
+                    let src = head[idx].out_buf();
+                    for (dst, sv) in eff.out_buf.iter_mut().zip(src.iter()) {
+                        *dst += *sv;
+                    }
+                }
+                eff.effect.process(&mut eff.out_buf, DSP_BLOCK_FRAMES);
+            }
+        }
+        for s in output.iter_mut() {
+            *s = 0.0;
+        }
+        for &idx in &self.terminal_indices {
+            let src = self.nodes[idx].out_buf();
+            for (dst, sv) in output.iter_mut().zip(src.iter()) {
+                *dst += *sv;
+            }
+        }
     }
 }
 
 /// Build everything from a validated graph and start playing.
 pub fn build(graph: &ValidGraph, app: AppHandle) -> AppResult<ActivePipeline> {
-    if graph.bridges.is_empty() {
+    if graph.outputs.is_empty() {
         return Err(AppError::Validation(
             "no routing — connect at least one input to at least one output".into(),
         ));
     }
 
-    // 1. Resolve every input device + its native config (only ones with bridges).
     let mut input_native_sr: HashMap<String, u32> = HashMap::new();
     let mut input_runtime: HashMap<String, ResolvedInput> = HashMap::new();
     for inp in &graph.inputs {
-        if !graph.bridges.iter().any(|b| b.input_id == inp.id) {
-            continue;
-        }
         let resolved = resolve_input(inp)?;
         input_native_sr.insert(inp.id.clone(), resolved.sample_rate());
         input_runtime.insert(inp.id.clone(), resolved);
     }
 
-    // 2. Resolve every output device + its native config. File recorders pick
-    //    their write SR from the connected inputs — using the *highest* input
-    //    rate avoids unnecessary downsampling, so the WAV preserves the best
-    //    quality the source can offer.
+    // File recorders use the highest source SR feeding them so the WAV never
+    // carries a downsampled signal.
     let mut output_runtime: HashMap<String, ResolvedOutput> = HashMap::new();
     for out in &graph.outputs {
-        if !graph.bridges.iter().any(|b| b.output_id == out.id) {
-            continue;
-        }
         let file_sr_hint: Option<u32> = if matches!(&out.spec, OutputSpec::FileRecording { .. }) {
-            graph
-                .bridges
-                .iter()
-                .filter(|b| b.output_id == out.id)
-                .filter_map(|b| input_native_sr.get(&b.input_id).copied())
+            inputs_feeding_output(out.id.as_str(), graph)
+                .into_iter()
+                .filter_map(|input_id| input_native_sr.get(input_id).copied())
                 .max()
         } else {
             None
@@ -318,60 +413,62 @@ pub fn build(graph: &ValidGraph, app: AppHandle) -> AppResult<ActivePipeline> {
         output_runtime.insert(out.id.clone(), resolved);
     }
 
-    // 3. Create per-bridge ring buffers and collect live-control handles.
     let mut producers_by_input: HashMap<String, Vec<Producer<f32>>> = HashMap::new();
-    let mut consumers_by_output: HashMap<String, Vec<BridgeConsumer>> = HashMap::new();
+    let mut output_graphs: HashMap<String, OutputGraph> = HashMap::new();
     let mut effect_controls: HashMap<String, EffectControl> = HashMap::new();
     let mut all_meters: Vec<MeterHandle> = Vec::new();
-    for bridge in &graph.bridges {
-        let input_sr = *input_native_sr
-            .get(&bridge.input_id)
-            .ok_or_else(|| AppError::Validation("bridge references unknown input".into()))?;
+    for out in &graph.outputs {
         let output_sr = output_runtime
-            .get(&bridge.output_id)
+            .get(&out.id)
             .map(|o| o.sample_rate())
-            .ok_or_else(|| AppError::Validation("bridge references unknown output".into()))?;
-
-        let (producer, consumer) = RingBuffer::<f32>::new(RING_CAPACITY);
-        producers_by_input
-            .entry(bridge.input_id.clone())
-            .or_default()
-            .push(producer);
-        let (bc, controls, bridge_meters) =
-            BridgeConsumer::new(consumer, input_sr, output_sr, &bridge.effects)?;
-        for (node_id, control) in controls {
-            // Effects are 1→1: each node id occurs in exactly one chain, so
-            // the first insert wins and `insert` is effectively idempotent.
-            effect_controls.entry(node_id).or_insert(control);
+            .ok_or_else(|| AppError::Validation("missing output runtime".into()))?;
+        let built = build_output_graph(
+            out.id.as_str(),
+            output_sr,
+            graph,
+            &input_native_sr,
+            &mut producers_by_input,
+        )?;
+        for (id, control) in built.controls {
+            effect_controls.entry(id).or_insert(control);
         }
-        all_meters.extend(bridge_meters);
-        consumers_by_output
-            .entry(bridge.output_id.clone())
-            .or_default()
-            .push(bc);
+        all_meters.extend(built.meters);
+        output_graphs.insert(out.id.clone(), built.graph);
     }
 
-    // 4. Start input streams (capturing into all subscriber rings).
     let mut input_streams = Vec::with_capacity(input_runtime.len());
     for (input_id, resolved) in input_runtime {
-        let producers = producers_by_input
-            .remove(&input_id)
-            .unwrap_or_default();
+        let producers = producers_by_input.remove(&input_id).unwrap_or_default();
+        if producers.is_empty() {
+            continue;
+        }
         let stream = start_input_stream(resolved, producers, &app)?;
         input_streams.push(stream);
     }
 
-    // 5. Start outputs (speaker streams + file recorder workers).
     let mut speaker_streams = Vec::new();
     let mut workers = Vec::new();
-    for (output_id, resolved) in output_runtime {
-        let consumers = consumers_by_output.remove(&output_id).unwrap_or_default();
+    for out in &graph.outputs {
+        let resolved = match output_runtime.remove(&out.id) {
+            Some(r) => r,
+            None => continue,
+        };
+        let og = match output_graphs.remove(&out.id) {
+            Some(g) => g,
+            None => continue,
+        };
         match resolved {
             ResolvedOutput::Speaker(spec) => {
-                speaker_streams.push(start_speaker_stream(spec, consumers, &app)?);
+                speaker_streams.push(start_speaker_stream(spec, og, &app)?);
             }
             ResolvedOutput::File { path, sample_rate } => {
-                workers.push(start_recorder_worker(path, sample_rate, consumers)?);
+                workers.push(start_recorder_worker(
+                    out.id.clone(),
+                    path,
+                    sample_rate,
+                    og,
+                    app.clone(),
+                )?);
             }
         }
     }
@@ -380,11 +477,12 @@ pub fn build(graph: &ValidGraph, app: AppHandle) -> AppResult<ActivePipeline> {
         inputs = input_streams.len(),
         speakers = speaker_streams.len(),
         recorders = workers.len(),
-        bridges = graph.bridges.len(),
+        outputs = graph.outputs.len(),
+        effects = graph.effects.len(),
+        edges = graph.edges.len(),
         "pipeline started"
     );
 
-    // 6. Spawn the meter tick thread if any LevelMeter exists in the graph.
     let meter_thread = if all_meters.is_empty() {
         None
     } else {
@@ -398,6 +496,177 @@ pub fn build(graph: &ValidGraph, app: AppHandle) -> AppResult<ActivePipeline> {
         effect_controls,
         _meter_thread: meter_thread,
     })
+}
+
+struct BuiltOutputGraph {
+    graph: OutputGraph,
+    controls: Vec<(String, EffectControl)>,
+    meters: Vec<MeterHandle>,
+}
+
+/// Build the per-output DAG: walk backward from `output_id`, topo-sort the
+/// reachable sub-graph, instantiate sources (with their rings) and effects
+/// (with their parameter atomics) in order.
+fn build_output_graph(
+    output_id: &str,
+    output_sr: u32,
+    valid: &ValidGraph,
+    input_native_sr: &HashMap<String, u32>,
+    producers_by_input: &mut HashMap<String, Vec<Producer<f32>>>,
+) -> AppResult<BuiltOutputGraph> {
+    let reachable = reachable_backward(output_id, valid);
+
+    // Topo sort restricted to the reachable sub-graph. Inputs have indegree 0
+    // within the sub-graph; outputs are excluded entirely (they're not DAG
+    // nodes here, just sinks).
+    let mut indegree: HashMap<String, usize> = HashMap::new();
+    for id in &reachable {
+        indegree.entry(id.clone()).or_insert(0);
+    }
+    for edge in &valid.edges {
+        if reachable.contains(&edge.from) && reachable.contains(&edge.to) {
+            *indegree.entry(edge.to.clone()).or_insert(0) += 1;
+        }
+    }
+    let mut queue: Vec<String> = indegree
+        .iter()
+        .filter(|(_, d)| **d == 0)
+        .map(|(id, _)| id.clone())
+        .collect();
+    queue.sort(); // deterministic order
+    let mut topo: Vec<String> = Vec::with_capacity(reachable.len());
+    while let Some(id) = queue.pop() {
+        topo.push(id.clone());
+        for edge in &valid.edges {
+            if edge.from == id && reachable.contains(&edge.to) {
+                let d = indegree.get_mut(&edge.to).unwrap();
+                *d -= 1;
+                if *d == 0 {
+                    queue.push(edge.to.clone());
+                }
+            }
+        }
+    }
+    if topo.len() != reachable.len() {
+        return Err(AppError::Validation(format!(
+            "internal: topo sort failed for output {output_id}"
+        )));
+    }
+
+    // Build nodes in topo order. `id_to_index` lets effects resolve their
+    // upstream node positions in the final Vec.
+    let mut nodes: Vec<DagNode> = Vec::with_capacity(topo.len());
+    let mut id_to_index: HashMap<String, usize> = HashMap::new();
+    let mut controls: Vec<(String, EffectControl)> = Vec::new();
+    let mut meters: Vec<MeterHandle> = Vec::new();
+
+    for id in &topo {
+        if let Some(_input) = valid.inputs.iter().find(|i| &i.id == id) {
+            let input_sr = *input_native_sr
+                .get(id)
+                .ok_or_else(|| AppError::Validation(format!("input {id} has no SR")))?;
+            let (producer, consumer) = RingBuffer::<f32>::new(RING_CAPACITY);
+            producers_by_input.entry(id.clone()).or_default().push(producer);
+
+            let resampler = if input_sr == output_sr {
+                None
+            } else {
+                Some(StereoResampler::new(input_sr, output_sr, RESAMPLE_CHUNK)?)
+            };
+            let out_max = resampler.as_ref().map(|r| r.out_max()).unwrap_or(RESAMPLE_CHUNK);
+            // ×4 headroom: one chunk draining + one in-flight + alignment slack.
+            let staging_cap = out_max * 4 + DSP_BLOCK_FRAMES * 2;
+            let input_frames_per_block = (DSP_BLOCK_FRAMES as u64 * input_sr as u64
+                + output_sr as u64
+                - 1)
+                / output_sr as u64;
+            let input_samples_per_block = (input_frames_per_block as usize) * 2;
+
+            let source = SourceState {
+                label: format!("{id}@{input_sr}->{output_sr}"),
+                consumer,
+                resampler,
+                input_staging: Vec::with_capacity(RESAMPLE_CHUNK * 2 + 8),
+                out_pending: StagingRing::with_capacity(staging_cap),
+                chunk_tmp: Vec::with_capacity(out_max * 2),
+                out_buf: vec![0.0; DSP_BLOCK_FRAMES * 2],
+                input_samples_per_block,
+                last_pop_at: Instant::now(),
+                first_data_logged: false,
+            };
+            id_to_index.insert(id.clone(), nodes.len());
+            nodes.push(DagNode::Source(source));
+        } else if let Some(effect) = valid.effects.iter().find(|e| &e.id == id) {
+            let build = instantiate_effect(&effect.spec, id);
+            if let Some(c) = build.control {
+                controls.push((id.clone(), c));
+            }
+            if let Some(m) = build.meter {
+                meters.push(m);
+            }
+            let incoming: Vec<usize> = valid
+                .edges
+                .iter()
+                .filter(|e| &e.to == id && reachable.contains(&e.from))
+                .map(|e| id_to_index[&e.from])
+                .collect();
+            id_to_index.insert(id.clone(), nodes.len());
+            nodes.push(DagNode::Effect(EffectState {
+                effect: build.effect,
+                incoming,
+                out_buf: vec![0.0; DSP_BLOCK_FRAMES * 2],
+            }));
+        }
+    }
+
+    let terminal_indices: Vec<usize> = valid
+        .edges
+        .iter()
+        .filter(|e| e.to == output_id)
+        .filter_map(|e| id_to_index.get(&e.from).copied())
+        .collect();
+
+    Ok(BuiltOutputGraph {
+        graph: OutputGraph {
+            sample_rate: output_sr,
+            nodes,
+            terminal_indices,
+        },
+        controls,
+        meters,
+    })
+}
+
+/// Node ids reachable backward from `output_id`, excluding the output node itself.
+fn reachable_backward(output_id: &str, valid: &ValidGraph) -> HashSet<String> {
+    let mut seen = HashSet::new();
+    let mut stack: Vec<String> = valid
+        .edges
+        .iter()
+        .filter(|e| e.to == output_id)
+        .map(|e| e.from.clone())
+        .collect();
+    while let Some(id) = stack.pop() {
+        if !seen.insert(id.clone()) {
+            continue;
+        }
+        for edge in &valid.edges {
+            if edge.to == id {
+                stack.push(edge.from.clone());
+            }
+        }
+    }
+    seen
+}
+
+fn inputs_feeding_output<'a>(output_id: &str, valid: &'a ValidGraph) -> Vec<&'a str> {
+    let reachable = reachable_backward(output_id, valid);
+    valid
+        .inputs
+        .iter()
+        .filter(|i| reachable.contains(&i.id))
+        .map(|i| i.id.as_str())
+        .collect()
 }
 
 // ---------- input resolution ----------
@@ -682,17 +951,65 @@ fn native_config(
 
 // ---------- output runtime: speakers ----------
 
+/// Output-side ring for the speaker pipeline. DSP worker pushes mixed stereo;
+/// the cpal callback drains. 32k samples = 16k stereo frames ≈ 340 ms @ 48 k —
+/// massive headroom for cpal/scheduler jitter, costs ~128 KB.
+const SPEAKER_RING_CAPACITY: usize = 32_768;
+
+/// Bundles the cpal stream with the DSP worker that feeds its ring. `Drop`
+/// stops cpal first (so the callback can't read stale memory mid-shutdown),
+/// then signals the worker and joins. Field order matters.
+struct SpeakerHandle {
+    _stream: cpal::Stream,
+    _worker: SpeakerWorker,
+}
+
+struct SpeakerWorker {
+    stop: Arc<AtomicBool>,
+    join: Option<JoinHandle<()>>,
+}
+
+impl Drop for SpeakerWorker {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::SeqCst);
+        if let Some(j) = self.join.take() {
+            let _ = j.join();
+        }
+    }
+}
+
 fn start_speaker_stream(
     spec: SpeakerResolved,
-    mut consumers: Vec<BridgeConsumer>,
+    graph: OutputGraph,
     app: &AppHandle,
-) -> AppResult<cpal::Stream> {
+) -> AppResult<SpeakerHandle> {
     info!(
         sample_rate = spec.sample_rate,
         channels = spec.out_channels,
         format = ?spec.sample_format,
         "opening speaker stream",
     );
+
+    // DSP worker fills this ring; the cpal callback drains it. Splits the
+    // resampling/effects work off the RT output thread.
+    let (mut producer, mut consumer) = RingBuffer::<f32>::new(SPEAKER_RING_CAPACITY);
+
+    let stop = Arc::new(AtomicBool::new(false));
+    let stop_thread = stop.clone();
+    let worker = DspWorker { graph };
+    let clock: Box<dyn ClockSource> =
+        Box::new(SystemClockTicker::new(spec.sample_rate, DSP_BLOCK_FRAMES));
+    let pacing = WorkerPacing::Clock(clock);
+    let join = thread::Builder::new()
+        .name(format!("speaker:{}", spec.sample_rate))
+        .spawn(move || {
+            worker.run(stop_thread, pacing, |block| {
+                streams::bulk_push(&mut producer, block);
+                Ok(())
+            });
+        })
+        .map_err(|e| AppError::Stream(format!("spawn speaker worker: {e}")))?;
+
     let app_err = app.clone();
     let err_cb = move |e: cpal::StreamError| {
         let _ = app_err.emit(
@@ -701,32 +1018,28 @@ fn start_speaker_stream(
         );
     };
 
-    let fill = move |stereo_out: &mut [f32], frames: usize| {
-        // Zero first; we accumulate into this buffer.
-        for s in stereo_out.iter_mut() {
-            *s = 0.0;
-        }
-        for i in 0..frames {
-            let mut l = 0.0_f32;
-            let mut r = 0.0_f32;
-            for bc in consumers.iter_mut() {
-                let [bl, br] = bc.pop_frame();
-                l += bl;
-                r += br;
-            }
-            stereo_out[i * 2] = l;
-            stereo_out[i * 2 + 1] = r;
-        }
+    // The cpal callback is now just a ring drain — no resampling, no effects,
+    // no mixing on the RT thread.
+    let fill = move |stereo_out: &mut [f32], _frames: usize| {
+        streams::bulk_pop(&mut consumer, stereo_out);
     };
 
-    streams::build_output_stream(
+    let stream = streams::build_output_stream(
         &spec.device,
         &spec.config,
         spec.sample_format,
         spec.out_channels,
         fill,
         err_cb,
-    )
+    )?;
+
+    Ok(SpeakerHandle {
+        _stream: stream,
+        _worker: SpeakerWorker {
+            stop,
+            join: Some(join),
+        },
+    })
 }
 
 // ---------- meter tick thread ----------
@@ -761,71 +1074,148 @@ fn spawn_meter_thread(app: AppHandle, meters: Vec<MeterHandle>) -> MeterTickThre
     }
 }
 
+// Speaker and File outputs share the same DspWorker; the speaker's cpal
+// callback is a plain ring drain, off the RT thread.
+
+const DSP_BLOCK_FRAMES: usize = 1024;
+/// Let input rings collect a few cpal buffers before starting the clock —
+/// otherwise the first block is all zeros.
+const DSP_PREROLL: Duration = Duration::from_millis(50);
+
+struct DspWorker {
+    graph: OutputGraph,
+}
+
+/// How a worker decides when to produce the next block.
+///
+/// `Clock` ticks on a steady wall-clock cadence — right for Speaker outputs
+/// where the device clock pulls audio in real time and a missed block becomes
+/// audible silence.
+///
+/// `OnAvailability` waits until every source has enough buffered input for a
+/// full output block (with a short timeout so a stalled source eventually
+/// proceeds with zero-fill rather than hanging the recording). Right for File
+/// outputs where bursty sources like ScreenCaptureKit drift against any
+/// wall-clock cadence — waiting for data eliminates the mid-recording dropouts
+/// that come from draining a half-empty ring.
+enum WorkerPacing {
+    Clock(Box<dyn ClockSource>),
+    OnAvailability,
+}
+
+/// Cap on how long an availability-paced worker waits for slow sources before
+/// proceeding with whatever it has (zero-fill for the missing samples).
+const AVAILABILITY_MAX_WAIT: Duration = Duration::from_millis(200);
+const AVAILABILITY_POLL: Duration = Duration::from_millis(2);
+
+impl DspWorker {
+    fn run<F>(mut self, stop: Arc<AtomicBool>, mut pacing: WorkerPacing, mut sink: F)
+    where
+        F: FnMut(&[f32]) -> AppResult<()>,
+    {
+        thread::sleep(DSP_PREROLL);
+        let mut block = vec![0.0_f32; DSP_BLOCK_FRAMES * 2];
+
+        loop {
+            let proceed = match &mut pacing {
+                WorkerPacing::Clock(clock) => clock.wait_for_tick(&stop),
+                WorkerPacing::OnAvailability => self.wait_until_ready(&stop),
+            };
+            if !proceed {
+                break;
+            }
+
+            self.graph.process_block(&mut block);
+            if let Err(e) = sink(&block) {
+                warn!(error = %e, "DSP worker sink failed; stopping");
+                break;
+            }
+        }
+    }
+
+    /// Poll the graph's source readiness with a brief sleep between checks.
+    /// Returns `false` only on stop — a timeout falls through to `true` so the
+    /// worker still produces a (possibly partial) block, keeping the recording
+    /// timeline moving when a source has truly gone silent.
+    fn wait_until_ready(&self, stop: &AtomicBool) -> bool {
+        let started = std::time::Instant::now();
+        loop {
+            if stop.load(Ordering::SeqCst) {
+                return false;
+            }
+            if self.graph.all_sources_ready() {
+                return true;
+            }
+            if started.elapsed() >= AVAILABILITY_MAX_WAIT {
+                return true;
+            }
+            thread::sleep(AVAILABILITY_POLL);
+        }
+    }
+}
+
 // ---------- output runtime: file recording ----------
 
 fn start_recorder_worker(
+    node_id: String,
     path: PathBuf,
     sample_rate: u32,
-    consumers: Vec<BridgeConsumer>,
+    graph: OutputGraph,
+    app: AppHandle,
 ) -> AppResult<RecorderWorker> {
-    let mut recorder = WavRecorder::create(&path, sample_rate)?;
+    let recorder = WavRecorder::create(&path, sample_rate)?;
     let stop = Arc::new(AtomicBool::new(false));
     let stop_thread = stop.clone();
-    let mut consumers = consumers;
+    let worker = DspWorker { graph };
+    let pacing = WorkerPacing::OnAvailability;
 
     let join = thread::Builder::new()
         .name(format!("recorder:{}", path.display()))
         .spawn(move || {
-            const BLOCK_FRAMES: usize = 1024;
-            // Flush the WAV every 2 seconds of wall time. Hound's underlying
-            // BufWriter caches bytes; without a periodic flush, a hard crash
-            // loses *all* unsynced audio. flush() doesn't update the RIFF
-            // header (hound only does that on finalize), so on crash the file
-            // still needs ffmpeg-style RIFF repair — but the audio bytes are
-            // safe on disk, which is what matters for a session recovery.
+            // Periodic flush so a crash loses at most ~2s of audio. RIFF
+            // header still needs ffmpeg-style recovery on crash (hound only
+            // writes it at finalize), but the PCM bytes are safe.
             const FLUSH_INTERVAL: Duration = Duration::from_secs(2);
+            const PROGRESS_INTERVAL: Duration = Duration::from_millis(250);
             let mut last_flush = std::time::Instant::now();
+            let mut last_progress = std::time::Instant::now();
+            let mut frames_written: u64 = 0;
+            let mut recorder = recorder;
 
-            let mut block: Vec<f32> = vec![0.0; BLOCK_FRAMES * 2];
-            while !stop_thread.load(Ordering::SeqCst) {
-                // Fill one block by polling each bridge once per frame.
-                for s in block.iter_mut() {
-                    *s = 0.0;
-                }
-                let mut produced_any = false;
-                for i in 0..BLOCK_FRAMES {
-                    let mut l = 0.0_f32;
-                    let mut r = 0.0_f32;
-                    let mut bridge_has_data = false;
-                    for bc in consumers.iter_mut() {
-                        let [bl, br] = bc.pop_frame();
-                        if bl != 0.0 || br != 0.0 {
-                            bridge_has_data = true;
-                        }
-                        l += bl;
-                        r += br;
-                    }
-                    block[i * 2] = l;
-                    block[i * 2 + 1] = r;
-                    if bridge_has_data {
-                        produced_any = true;
-                    }
-                }
-                if let Err(e) = recorder.write_stereo(&block) {
-                    warn!(error = %e, "wav write failed; stopping recorder");
-                    break;
-                }
+            worker.run(stop_thread, pacing, |block| {
+                recorder.write_stereo(block)?;
+                frames_written += (block.len() / 2) as u64;
+
                 if last_flush.elapsed() >= FLUSH_INTERVAL {
                     if let Err(e) = recorder.flush() {
                         warn!(error = %e, "wav flush failed");
                     }
                     last_flush = std::time::Instant::now();
                 }
-                if !produced_any {
-                    // Inputs not feeding us yet → don't busy-loop.
-                    thread::sleep(RECORDER_POLL);
+                if last_progress.elapsed() >= PROGRESS_INTERVAL {
+                    let _ = app.emit(
+                        "audio://recorder_progress",
+                        json!({
+                            "nodeId": node_id,
+                            "frames": frames_written,
+                            "sampleRate": sample_rate,
+                        }),
+                    );
+                    last_progress = std::time::Instant::now();
                 }
-            }
+                Ok(())
+            });
+
+            let _ = app.emit(
+                "audio://recorder_progress",
+                json!({
+                    "nodeId": node_id,
+                    "frames": frames_written,
+                    "sampleRate": sample_rate,
+                    "stopped": true,
+                }),
+            );
+
             if let Err(e) = recorder.finalize() {
                 warn!(error = %e, "wav finalize failed");
             }

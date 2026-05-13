@@ -16,11 +16,36 @@ use rtrb::Producer;
 use crate::audio::format::{convert_to_stereo, write_stereo_to_output};
 use crate::error::{AppError, AppResult};
 
-/// Bulk-push a slice into an SPSC ring with a single `write_chunk` reservation
-/// instead of per-sample atomic-CAS via `push`. ~10–50× cheaper on the RT
-/// thread. On overflow only the head fits — the tail is silently dropped (the
-/// consumer is falling behind, glitches are inevitable; staying RT-safe is
-/// what matters).
+/// Bulk drain `dst.len()` samples from an SPSC ring. Anything we couldn't
+/// read (consumer faster than producer) is zero-filled — that's the device
+/// playing silence, not glitching.
+pub fn bulk_pop(cons: &mut rtrb::Consumer<f32>, dst: &mut [f32]) {
+    let want = dst.len();
+    if want == 0 {
+        return;
+    }
+    let avail = cons.slots();
+    let to_read = want.min(avail);
+    if to_read > 0 {
+        if let Ok(chunk) = cons.read_chunk(to_read) {
+            let (first, second) = chunk.as_slices();
+            let n1 = first.len();
+            dst[..n1].copy_from_slice(first);
+            let n2 = second.len();
+            if n2 > 0 {
+                dst[n1..n1 + n2].copy_from_slice(second);
+            }
+            chunk.commit_all();
+        }
+    }
+    for s in &mut dst[to_read..] {
+        *s = 0.0;
+    }
+}
+
+/// Bulk push via one `write_chunk` reservation — one atomic-CAS per block
+/// instead of one per sample. On overflow only the head fits and the rest is
+/// dropped (consumer is behind anyway; staying RT-safe beats blocking).
 pub fn bulk_push(prod: &mut Producer<f32>, samples: &[f32]) {
     let want = samples.len();
     if want == 0 {
@@ -43,8 +68,8 @@ pub fn bulk_push(prod: &mut Producer<f32>, samples: &[f32]) {
     }
 }
 
-/// Build an input stream that broadcasts converted-to-stereo f32 frames to all
-/// given producer rings. The stream is **not** started — call `.play()` after.
+/// Build and start an input stream that broadcasts converted-to-stereo f32
+/// frames to all given producer rings.
 pub fn build_input_stream(
     device: &cpal::Device,
     config: &StreamConfig,
@@ -53,8 +78,6 @@ pub fn build_input_stream(
     producers: Vec<Producer<f32>>,
     err_cb: impl FnMut(cpal::StreamError) + Send + 'static,
 ) -> AppResult<cpal::Stream> {
-    // Dispatch on sample format. Each branch instantiates a typed
-    // `build_input_stream::<T, _, _>`.
     match sample_format {
         SampleFormat::F32 => build_input_typed::<f32>(device, config, src_channels, producers, err_cb),
         SampleFormat::I16 => build_input_typed::<i16>(device, config, src_channels, producers, err_cb),
@@ -81,7 +104,6 @@ where
     T: Sample + cpal::SizedSample + Send + 'static,
     f32: cpal::FromSample<T>,
 {
-    // Pre-allocate generously: cpal typically delivers ≤4096 frames per callback.
     let mut staging: Vec<f32> = vec![0.0; 16384];
     let stream = device
         .build_input_stream::<T, _, _>(
@@ -110,9 +132,7 @@ where
     Ok(stream)
 }
 
-/// Build an output stream that reads f32 stereo from a closure-supplied source.
-/// The `fill` closure receives an interleaved stereo buffer to fill, length
-/// `frames * 2`. The stream is started (`play()`) before returning.
+/// Build and start an output stream that pulls f32 stereo from `fill`.
 pub fn build_output_stream<F>(
     device: &cpal::Device,
     config: &StreamConfig,
