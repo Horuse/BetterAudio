@@ -274,37 +274,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "72b3254f16251a8381aa12e40e3c4d2f0199f8c6508fbecb9d91f575e0fbb8c6"
 
 [[package]]
-name = "betteraudio"
-version = "0.1.0"
-dependencies = [
- "base64 0.22.1",
- "cpal",
- "ebur128",
- "embed_plist",
- "flac-codec",
- "hound",
- "mp3lame-encoder",
- "objc2",
- "objc2-app-kit",
- "objc2-foundation",
- "ogg",
- "opus",
- "rtrb",
- "rubato",
- "serde",
- "serde_json",
- "tauri",
- "tauri-build",
- "tauri-plugin-dialog",
- "tauri-plugin-opener",
- "tauri-plugin-store",
- "thiserror 1.0.69",
- "tracing",
- "tracing-subscriber",
- "ts-rs",
-]
-
-[[package]]
 name = "bindgen"
 version = "0.72.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3693,6 +3662,37 @@ dependencies = [
  "gobject-sys",
  "libc",
  "system-deps",
+]
+
+[[package]]
+name = "splitwave"
+version = "0.1.0"
+dependencies = [
+ "base64 0.22.1",
+ "cpal",
+ "ebur128",
+ "embed_plist",
+ "flac-codec",
+ "hound",
+ "mp3lame-encoder",
+ "objc2",
+ "objc2-app-kit",
+ "objc2-foundation",
+ "ogg",
+ "opus",
+ "rtrb",
+ "rubato",
+ "serde",
+ "serde_json",
+ "tauri",
+ "tauri-build",
+ "tauri-plugin-dialog",
+ "tauri-plugin-opener",
+ "tauri-plugin-store",
+ "thiserror 1.0.69",
+ "tracing",
+ "tracing-subscriber",
+ "ts-rs",
 ]
 
 [[package]]

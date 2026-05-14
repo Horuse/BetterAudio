@@ -26,7 +26,7 @@ import Delay from '../ui/effect/delay.svelte';
 import Reverb from '../ui/effect/reverb.svelte';
 
 // MIME type used during drag-and-drop from the sidebar.
-export const DND_MIME = 'application/x-betteraudio-nodekind';
+export const DND_MIME = 'application/x-splitwave-nodekind';
 
 export interface NodeRegistryEntry<K extends NodeKind = NodeKind> {
 	kind: K;

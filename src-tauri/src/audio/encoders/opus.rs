@@ -165,7 +165,7 @@ fn write_opus_tags<W: Write>(
 	writer: &mut PacketWriter<'_, W>,
 	serial: u32,
 ) -> AppResult<()> {
-	const VENDOR: &[u8] = b"BetterAudio";
+	const VENDOR: &[u8] = b"Splitwave";
 	let mut buf = Vec::with_capacity(8 + 4 + VENDOR.len() + 4);
 	buf.extend_from_slice(b"OpusTags");
 	buf.extend_from_slice(&(VENDOR.len() as u32).to_le_bytes());

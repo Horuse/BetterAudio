@@ -36,7 +36,7 @@ private enum FilterMode {
 @available(macOS 13.0, *)
 private final class Capture: NSObject, SCStreamOutput, SCStreamDelegate {
     private let queue = DispatchQueue(
-        label: "com.heorhii.betteraudio.sck",
+        label: "com.horuse.splitwave.sck",
         qos: .userInitiated
     )
     private var stream: SCStream?

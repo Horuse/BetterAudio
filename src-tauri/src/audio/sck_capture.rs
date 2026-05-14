@@ -188,7 +188,7 @@ impl SckCapture {
 
     /// Start capturing system-wide audio. When `exclude_current_app` is true,
     /// our own process's audio is omitted from the mix (prevents feedback loops
-    /// when System Audio → speaker is wired through BetterAudio itself).
+    /// when System Audio → speaker is wired through Splitwave itself).
     pub fn start_system(
         exclude_current_app: bool,
         sample_rate: u32,

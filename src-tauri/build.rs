@@ -31,7 +31,7 @@ fn compile_swift_static_lib() {
     let target_triple = env::var("TARGET").unwrap_or_else(|_| "arm64-apple-darwin".into());
     let swift_target = swift_target_for(&target_triple);
 
-    let lib_name = "betteraudio_native";
+    let lib_name = "splitwave_native";
     let lib_path = lib_dir.join(format!("lib{lib_name}.a"));
 
     // Use `swiftc` directly (NOT `swift build`) — SwiftPM's ManifestAPI on the
@@ -47,7 +47,7 @@ fn compile_swift_static_lib() {
         "-target",
         &swift_target,
         "-module-name",
-        "BetterAudioNative",
+        "SplitwaveNative",
         "-o",
         lib_path.to_str().unwrap(),
     ]);

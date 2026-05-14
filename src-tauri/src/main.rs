@@ -8,5 +8,5 @@
 embed_plist::embed_info_plist!("../Info.plist");
 
 fn main() {
-    betteraudio_lib::run()
+    splitwave_lib::run()
 }

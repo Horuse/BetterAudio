@@ -3,9 +3,9 @@
 <plist version="1.0">
 <dict>
 	<key>NSMicrophoneUsageDescription</key>
-	<string>BetterAudio needs microphone access to route audio between devices.</string>
+	<string>Splitwave needs microphone access to route audio between devices.</string>
 	<key>NSScreenCaptureUsageDescription</key>
-	<string>BetterAudio uses Screen Recording permission to capture system or per-app audio via ScreenCaptureKit.</string>
+	<string>Splitwave uses Screen Recording permission to capture system or per-app audio via ScreenCaptureKit.</string>
 	<key>LSMinimumSystemVersion</key>
 	<string>13.0</string>
 </dict>

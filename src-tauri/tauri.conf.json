@@ -1,8 +1,8 @@
 {
 	"$schema": "https://schema.tauri.app/config/2",
-	"productName": "betteraudio",
+	"productName": "Splitwave",
 	"version": "0.1.0",
-	"identifier": "com.heorhii.betteraudio",
+	"identifier": "com.horuse.splitwave",
 	"build": {
 		"beforeDevCommand": "bun run dev",
 		"devUrl": "http://localhost:1420",
@@ -12,7 +12,7 @@
 	"app": {
 		"windows": [
 			{
-				"title": "BetterAudio",
+				"title": "Splitwave",
 				"width": 1200,
 				"height": 800,
 				"dragDropEnabled": false,
