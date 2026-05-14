@@ -19,6 +19,8 @@ import Eq from '../ui/effect/eq.svelte';
 import LevelMeter from '../ui/effect/level_meter.svelte';
 import LufsMeter from '../ui/effect/lufs_meter.svelte';
 import Limiter from '../ui/effect/limiter.svelte';
+import Compressor from '../ui/effect/compressor.svelte';
+import NoiseGate from '../ui/effect/noise_gate.svelte';
 
 // MIME type used during drag-and-drop from the sidebar.
 export const DND_MIME = 'application/x-betteraudio-nodekind';
@@ -140,6 +142,22 @@ export const registry: Record<NodeKind, NodeRegistryEntry> = {
 		description: 'Brick-wall limiter with look-ahead — catches peaks before they emerge, instant attack with exponential release.',
 		component: Limiter,
 		defaultData: { ceilingDb: -0.3, lookaheadMs: 5, releaseMs: 50 }
+	}),
+	compressor: entry<'compressor'>({
+		kind: 'compressor',
+		category: 'effect',
+		label: 'Compressor',
+		description: 'Threshold/ratio compressor with soft knee, separate attack/release, and makeup gain.',
+		component: Compressor,
+		defaultData: { thresholdDb: -18, ratio: 3, attackMs: 10, releaseMs: 100, kneeDb: 6, makeupDb: 0 }
+	}),
+	noiseGate: entry<'noiseGate'>({
+		kind: 'noiseGate',
+		category: 'effect',
+		label: 'Noise Gate',
+		description: 'Closes when input drops below threshold; hold timer prevents chatter on borderline signals.',
+		component: NoiseGate,
+		defaultData: { thresholdDb: -40, rangeDb: -40, attackMs: 1, holdMs: 50, releaseMs: 200 }
 	})
 };
 

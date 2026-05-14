@@ -13,7 +13,9 @@ export type NodeKind =
 	| 'eq'
 	| 'levelMeter'
 	| 'lufsMeter'
-	| 'limiter';
+	| 'limiter'
+	| 'compressor'
+	| 'noiseGate';
 
 export interface MicrophoneNodeData extends Record<string, unknown> {
 	deviceId: string | null;
@@ -73,6 +75,24 @@ export interface LimiterNodeData extends Record<string, unknown> {
 	releaseMs: number;
 }
 
+export interface CompressorNodeData extends Record<string, unknown> {
+	thresholdDb: number;
+	ratio: number;
+	attackMs: number;
+	releaseMs: number;
+	kneeDb: number;
+	makeupDb: number;
+}
+
+export interface NoiseGateNodeData extends Record<string, unknown> {
+	thresholdDb: number;
+	/** Closed-gate attenuation in dB (negative). */
+	rangeDb: number;
+	attackMs: number;
+	holdMs: number;
+	releaseMs: number;
+}
+
 export type NodeDataMap = {
 	microphone: MicrophoneNodeData;
 	systemAudio: SystemAudioNodeData;
@@ -87,6 +107,8 @@ export type NodeDataMap = {
 	levelMeter: LevelMeterNodeData;
 	lufsMeter: LufsMeterNodeData;
 	limiter: LimiterNodeData;
+	compressor: CompressorNodeData;
+	noiseGate: NoiseGateNodeData;
 };
 
 export type AnyNodeData = NodeDataMap[NodeKind];

@@ -13,8 +13,8 @@ use serde_json::Value;
 use ebur128::{EbuR128, Mode};
 
 use crate::audio::graph::{
-    ChannelBalanceData, EffectSpec, EqData, GainData, LevelMeterData, LimiterData, LufsMeterData,
-    MuteData, SaturatorData,
+    ChannelBalanceData, CompressorData, EffectSpec, EqData, GainData, LevelMeterData, LimiterData,
+    LufsMeterData, MuteData, NoiseGateData, SaturatorData,
 };
 
 pub trait Effect: Send {
@@ -38,6 +38,8 @@ pub enum RuntimeEffect {
     LevelMeter(LevelMeterEffect),
     LufsMeter(LufsMeterEffect),
     Limiter(LimiterEffect),
+    Compressor(CompressorEffect),
+    NoiseGate(NoiseGateEffect),
 }
 
 impl RuntimeEffect {
@@ -52,6 +54,8 @@ impl RuntimeEffect {
             RuntimeEffect::LevelMeter(e) => e.process(samples, frames),
             RuntimeEffect::LufsMeter(e) => e.process(samples, frames),
             RuntimeEffect::Limiter(e) => e.process(samples, frames),
+            RuntimeEffect::Compressor(e) => e.process(samples, frames),
+            RuntimeEffect::NoiseGate(e) => e.process(samples, frames),
         }
     }
 
@@ -66,6 +70,8 @@ impl RuntimeEffect {
             RuntimeEffect::LevelMeter(e) => e.latency_frames(),
             RuntimeEffect::LufsMeter(e) => e.latency_frames(),
             RuntimeEffect::Limiter(e) => e.latency_frames(),
+            RuntimeEffect::Compressor(e) => e.latency_frames(),
+            RuntimeEffect::NoiseGate(e) => e.latency_frames(),
         }
     }
 }
@@ -92,6 +98,21 @@ pub enum EffectControl {
     },
     Limiter {
         ceiling: Arc<AtomicU32>,
+        release_ms: Arc<AtomicU32>,
+    },
+    Compressor {
+        threshold_db: Arc<AtomicU32>,
+        ratio: Arc<AtomicU32>,
+        attack_ms: Arc<AtomicU32>,
+        release_ms: Arc<AtomicU32>,
+        knee_db: Arc<AtomicU32>,
+        makeup_db: Arc<AtomicU32>,
+    },
+    NoiseGate {
+        threshold_db: Arc<AtomicU32>,
+        range_db: Arc<AtomicU32>,
+        attack_ms: Arc<AtomicU32>,
+        hold_ms: Arc<AtomicU32>,
         release_ms: Arc<AtomicU32>,
     },
 }
@@ -144,6 +165,34 @@ impl EffectControl {
                 if let Some(ms) = num(data, "releaseMs") {
                     store_f32(release_ms, ms.max(0.1));
                 }
+            }
+            EffectControl::Compressor {
+                threshold_db,
+                ratio,
+                attack_ms,
+                release_ms,
+                knee_db,
+                makeup_db,
+            } => {
+                if let Some(v) = num(data, "thresholdDb") { store_f32(threshold_db, v); }
+                if let Some(v) = num(data, "ratio") { store_f32(ratio, v.max(1.0)); }
+                if let Some(v) = num(data, "attackMs") { store_f32(attack_ms, v.max(0.01)); }
+                if let Some(v) = num(data, "releaseMs") { store_f32(release_ms, v.max(0.1)); }
+                if let Some(v) = num(data, "kneeDb") { store_f32(knee_db, v.max(0.0)); }
+                if let Some(v) = num(data, "makeupDb") { store_f32(makeup_db, v); }
+            }
+            EffectControl::NoiseGate {
+                threshold_db,
+                range_db,
+                attack_ms,
+                hold_ms,
+                release_ms,
+            } => {
+                if let Some(v) = num(data, "thresholdDb") { store_f32(threshold_db, v); }
+                if let Some(v) = num(data, "rangeDb") { store_f32(range_db, v.min(0.0)); }
+                if let Some(v) = num(data, "attackMs") { store_f32(attack_ms, v.max(0.01)); }
+                if let Some(v) = num(data, "holdMs") { store_f32(hold_ms, v.max(0.0)); }
+                if let Some(v) = num(data, "releaseMs") { store_f32(release_ms, v.max(0.1)); }
             }
         }
     }
@@ -667,6 +716,192 @@ impl Effect for LimiterEffect {
     }
 }
 
+/// Per-sample envelope-follower compressor: branched attack/release smoothing,
+/// soft-knee gain reduction in the dB domain, stereo-linked detection.
+pub struct CompressorEffect {
+    threshold_db: Arc<AtomicU32>,
+    ratio: Arc<AtomicU32>,
+    attack_ms: Arc<AtomicU32>,
+    release_ms: Arc<AtomicU32>,
+    knee_db: Arc<AtomicU32>,
+    makeup_db: Arc<AtomicU32>,
+    sample_rate: u32,
+    envelope: f32,
+}
+
+impl CompressorEffect {
+    fn new(d: CompressorData, sample_rate: u32) -> (Self, EffectControl) {
+        let threshold_db = Arc::new(AtomicU32::new(d.threshold_db.to_bits()));
+        let ratio = Arc::new(AtomicU32::new(d.ratio.max(1.0).to_bits()));
+        let attack_ms = Arc::new(AtomicU32::new(d.attack_ms.max(0.01).to_bits()));
+        let release_ms = Arc::new(AtomicU32::new(d.release_ms.max(0.1).to_bits()));
+        let knee_db = Arc::new(AtomicU32::new(d.knee_db.max(0.0).to_bits()));
+        let makeup_db = Arc::new(AtomicU32::new(d.makeup_db.to_bits()));
+        let control = EffectControl::Compressor {
+            threshold_db: threshold_db.clone(),
+            ratio: ratio.clone(),
+            attack_ms: attack_ms.clone(),
+            release_ms: release_ms.clone(),
+            knee_db: knee_db.clone(),
+            makeup_db: makeup_db.clone(),
+        };
+        (
+            Self {
+                threshold_db,
+                ratio,
+                attack_ms,
+                release_ms,
+                knee_db,
+                makeup_db,
+                sample_rate,
+                envelope: 0.0,
+            },
+            control,
+        )
+    }
+}
+
+impl Effect for CompressorEffect {
+    fn process(&mut self, samples: &mut [f32], frames: usize) {
+        let threshold_db = load_f32(&self.threshold_db);
+        let ratio = load_f32(&self.ratio).max(1.0);
+        let attack_ms = load_f32(&self.attack_ms).max(0.01);
+        let release_ms = load_f32(&self.release_ms).max(0.1);
+        let knee_db = load_f32(&self.knee_db).max(0.0);
+        let makeup_db = load_f32(&self.makeup_db);
+
+        let sr = self.sample_rate as f32;
+        let attack_coeff = 1.0 - (-1.0 / (attack_ms * 0.001 * sr)).exp();
+        let release_coeff = 1.0 - (-1.0 / (release_ms * 0.001 * sr)).exp();
+        let inv_ratio = 1.0 / ratio;
+        let makeup_lin = 10f32.powf(makeup_db / 20.0);
+        let half_knee = knee_db * 0.5;
+
+        let stereo = &mut samples[..frames * 2];
+        for frame in stereo.chunks_exact_mut(2) {
+            // Stereo-linked peak detection: louder channel drives both.
+            let detected = frame[0].abs().max(frame[1].abs());
+            if detected > self.envelope {
+                self.envelope += (detected - self.envelope) * attack_coeff;
+            } else {
+                self.envelope += (detected - self.envelope) * release_coeff;
+            }
+
+            let env_db = if self.envelope < 1e-6 {
+                -120.0
+            } else {
+                20.0 * self.envelope.log10()
+            };
+            let over = env_db - threshold_db;
+            let gain_red_db = if knee_db > 0.0 && over > -half_knee && over < half_knee {
+                // Quadratic soft-knee transition; smooth at both endpoints.
+                let x = over + half_knee;
+                (1.0 - inv_ratio) * x * x / (2.0 * knee_db)
+            } else if over > 0.0 {
+                over * (1.0 - inv_ratio)
+            } else {
+                0.0
+            };
+            let gain_lin = 10f32.powf(-gain_red_db / 20.0) * makeup_lin;
+            frame[0] *= gain_lin;
+            frame[1] *= gain_lin;
+        }
+    }
+}
+
+/// Noise gate: closes (attenuates by `range_db`) when input falls below
+/// `threshold_db`; a `hold_ms` timer prevents chatter on borderline signals.
+pub struct NoiseGateEffect {
+    threshold_db: Arc<AtomicU32>,
+    range_db: Arc<AtomicU32>,
+    attack_ms: Arc<AtomicU32>,
+    hold_ms: Arc<AtomicU32>,
+    release_ms: Arc<AtomicU32>,
+    sample_rate: u32,
+    envelope: f32,
+    current_gain: f32,
+    /// Frames remaining in the "open during hold" state; reset whenever the
+    /// envelope crosses above threshold.
+    hold_remaining: u32,
+}
+
+impl NoiseGateEffect {
+    fn new(d: NoiseGateData, sample_rate: u32) -> (Self, EffectControl) {
+        let threshold_db = Arc::new(AtomicU32::new(d.threshold_db.to_bits()));
+        let range_db = Arc::new(AtomicU32::new(d.range_db.min(0.0).to_bits()));
+        let attack_ms = Arc::new(AtomicU32::new(d.attack_ms.max(0.01).to_bits()));
+        let hold_ms = Arc::new(AtomicU32::new(d.hold_ms.max(0.0).to_bits()));
+        let release_ms = Arc::new(AtomicU32::new(d.release_ms.max(0.1).to_bits()));
+        let control = EffectControl::NoiseGate {
+            threshold_db: threshold_db.clone(),
+            range_db: range_db.clone(),
+            attack_ms: attack_ms.clone(),
+            hold_ms: hold_ms.clone(),
+            release_ms: release_ms.clone(),
+        };
+        (
+            Self {
+                threshold_db,
+                range_db,
+                attack_ms,
+                hold_ms,
+                release_ms,
+                sample_rate,
+                envelope: 0.0,
+                current_gain: 1.0,
+                hold_remaining: 0,
+            },
+            control,
+        )
+    }
+}
+
+/// Envelope-detector release time constant; short enough for fast gate
+/// closing without re-opening on every transient.
+const GATE_DETECTOR_RELEASE_MS: f32 = 10.0;
+
+impl Effect for NoiseGateEffect {
+    fn process(&mut self, samples: &mut [f32], frames: usize) {
+        let threshold_db = load_f32(&self.threshold_db);
+        let range_db = load_f32(&self.range_db).min(0.0);
+        let attack_ms = load_f32(&self.attack_ms).max(0.01);
+        let hold_ms = load_f32(&self.hold_ms).max(0.0);
+        let release_ms = load_f32(&self.release_ms).max(0.1);
+
+        let sr = self.sample_rate as f32;
+        let attack_coeff = 1.0 - (-1.0 / (attack_ms * 0.001 * sr)).exp();
+        let release_coeff = 1.0 - (-1.0 / (release_ms * 0.001 * sr)).exp();
+        let detector_release_coeff =
+            1.0 - (-1.0 / (GATE_DETECTOR_RELEASE_MS * 0.001 * sr)).exp();
+        let threshold_lin = db_to_linear(threshold_db);
+        let closed_gain = db_to_linear(range_db);
+        let hold_samples = (hold_ms * 0.001 * sr) as u32;
+
+        let stereo = &mut samples[..frames * 2];
+        for frame in stereo.chunks_exact_mut(2) {
+            let detected = frame[0].abs().max(frame[1].abs());
+            let coeff = if detected > self.envelope { attack_coeff } else { detector_release_coeff };
+            self.envelope += (detected - self.envelope) * coeff;
+
+            let target_gain = if self.envelope >= threshold_lin {
+                self.hold_remaining = hold_samples;
+                1.0
+            } else if self.hold_remaining > 0 {
+                self.hold_remaining -= 1;
+                1.0
+            } else {
+                closed_gain
+            };
+
+            let coeff = if target_gain > self.current_gain { attack_coeff } else { release_coeff };
+            self.current_gain += (target_gain - self.current_gain) * coeff;
+
+            frame[0] *= self.current_gain;
+            frame[1] *= self.current_gain;
+        }
+    }
+}
+
 /// RBJ cookbook biquad in Transposed Direct Form II — one state pair (z1, z2)
 /// per channel, half the rounding noise of DF I.
 #[derive(Clone, Copy, Default)]
@@ -1033,6 +1268,74 @@ pub fn instantiate_effect(
                 registry.controls.insert(node_id.to_string(), c.clone());
                 EffectBuild {
                     effect: RuntimeEffect::Limiter(e),
+                    control: Some(c),
+                    meter: None,
+                    lufs: None,
+                }
+            }
+        },
+        EffectSpec::Compressor(d) => match registry.controls.get(node_id) {
+            Some(EffectControl::Compressor {
+                threshold_db,
+                ratio,
+                attack_ms,
+                release_ms,
+                knee_db,
+                makeup_db,
+            }) => EffectBuild {
+                effect: RuntimeEffect::Compressor(CompressorEffect {
+                    threshold_db: threshold_db.clone(),
+                    ratio: ratio.clone(),
+                    attack_ms: attack_ms.clone(),
+                    release_ms: release_ms.clone(),
+                    knee_db: knee_db.clone(),
+                    makeup_db: makeup_db.clone(),
+                    sample_rate,
+                    envelope: 0.0,
+                }),
+                control: None,
+                meter: None,
+                lufs: None,
+            },
+            _ => {
+                let (e, c) = CompressorEffect::new(d, sample_rate);
+                registry.controls.insert(node_id.to_string(), c.clone());
+                EffectBuild {
+                    effect: RuntimeEffect::Compressor(e),
+                    control: Some(c),
+                    meter: None,
+                    lufs: None,
+                }
+            }
+        },
+        EffectSpec::NoiseGate(d) => match registry.controls.get(node_id) {
+            Some(EffectControl::NoiseGate {
+                threshold_db,
+                range_db,
+                attack_ms,
+                hold_ms,
+                release_ms,
+            }) => EffectBuild {
+                effect: RuntimeEffect::NoiseGate(NoiseGateEffect {
+                    threshold_db: threshold_db.clone(),
+                    range_db: range_db.clone(),
+                    attack_ms: attack_ms.clone(),
+                    hold_ms: hold_ms.clone(),
+                    release_ms: release_ms.clone(),
+                    sample_rate,
+                    envelope: 0.0,
+                    current_gain: 1.0,
+                    hold_remaining: 0,
+                }),
+                control: None,
+                meter: None,
+                lufs: None,
+            },
+            _ => {
+                let (e, c) = NoiseGateEffect::new(d, sample_rate);
+                registry.controls.insert(node_id.to_string(), c.clone());
+                EffectBuild {
+                    effect: RuntimeEffect::NoiseGate(e),
                     control: Some(c),
                     meter: None,
                     lufs: None,
