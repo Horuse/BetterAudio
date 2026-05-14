@@ -313,7 +313,7 @@ pub enum InputSpec {
     Microphone { device_id: String },
     SystemAudio { exclude_current_app: bool },
     AppAudio { bundle_id: String },
-    AudioFile { file_path: String, loop_enabled: bool },
+    AudioFile { file_path: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -521,7 +521,6 @@ impl GraphSpec {
                         file_path: data
                             .file_path
                             .ok_or_else(|| miss(&n.id, "Audio File has no file selected"))?,
-                        loop_enabled: data.loop_enabled,
                     }
                 }
                 _ => unreachable!(),

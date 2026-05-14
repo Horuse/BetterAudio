@@ -3,7 +3,14 @@ import type { Pipeline } from './types';
 
 const STORE_FILE = 'pipelines.json';
 const KEY_PREFIX = 'pipeline:';
+const SNAPSHOT_KEY_PREFIX = 'snapshots:';
+const MAX_SNAPSHOTS = 20;
 const store = new LazyStore(STORE_FILE);
+
+export interface Snapshot {
+	takenAt: number;
+	pipeline: Pipeline;
+}
 
 export const methods = {
 	emptyPipeline(id: string, name: string): Pipeline {
@@ -30,6 +37,23 @@ export const methods = {
 
 	async remove(id: string): Promise<void> {
 		await store.delete(KEY_PREFIX + id);
+		await store.delete(SNAPSHOT_KEY_PREFIX + id);
+		await store.save();
+	},
+
+	async listSnapshots(id: string): Promise<Snapshot[]> {
+		return (await store.get<Snapshot[]>(SNAPSHOT_KEY_PREFIX + id)) ?? [];
+	},
+
+	async addSnapshot(p: Pipeline): Promise<void> {
+		const key = SNAPSHOT_KEY_PREFIX + p.id;
+		const existing = (await store.get<Snapshot[]>(key)) ?? [];
+		existing.push({ takenAt: Date.now(), pipeline: p });
+		// Ring-buffer behaviour -- drop oldest.
+		if (existing.length > MAX_SNAPSHOTS) {
+			existing.splice(0, existing.length - MAX_SNAPSHOTS);
+		}
+		await store.set(key, existing);
 		await store.save();
 	}
 };

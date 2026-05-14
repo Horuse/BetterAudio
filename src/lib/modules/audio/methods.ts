@@ -33,6 +33,9 @@ export const methods = {
 	/** Seek an AudioFile input. No-op when not running. */
 	seekAudioFile: (nodeId: string, frame: number): Promise<void> =>
 		invoke('seek_audio_file', { nodeId, frame }),
+	/** Live loop toggle for an AudioFile input. No-op when not running. */
+	setAudioFileLoop: (nodeId: string, enabled: boolean): Promise<void> =>
+		invoke('set_audio_file_loop', { nodeId, enabled }),
 	/** `null` when the device has no software-settable volume in that scope. */
 	getDeviceVolume: (kind: 'input' | 'output', name: string): Promise<number | null> =>
 		invoke<number | null>('get_device_volume', { kind, name }),

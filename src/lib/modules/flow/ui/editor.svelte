@@ -8,10 +8,13 @@
 		type Node as XyNode
 	} from '@xyflow/svelte';
 	import { createId } from '@paralleldrive/cuid2';
+	import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 	import { onDestroy, onMount, untrack } from 'svelte';
 	import type { NodeKind, Pipeline } from '$lib/modules/pipeline/types';
 	import { pipelineStore } from '$lib/modules/pipeline/stores.svelte';
+	import { methods as pipelineMethods } from '$lib/modules/pipeline/methods';
 	import { audioStore } from '$lib/modules/audio/stores.svelte';
+	import { methods as audioMethods } from '$lib/modules/audio/methods';
 	import {
 		DND_MIME,
 		defaultDataFor,
@@ -104,7 +107,21 @@
 		};
 	}
 
-	pipelineStore.editorActions = { addNode, getSnapshot };
+	function revertToSnapshot(p: Pipeline) {
+		nodes = toXyNodes(p.nodes);
+		edges = toXyEdges(p.edges);
+	}
+
+	pipelineStore.editorActions = { addNode, getSnapshot, revertToSnapshot };
+
+	// Capture on the debounced save tick when enough time has passed --
+	// piggy-backs on real edits, no blind interval.
+	const SNAPSHOT_MIN_SPACING_MS = 30_000;
+	let lastSnapshotSig = '';
+	let lastSnapshotAt = 0;
+	function snapshotSignature(p: Pipeline): string {
+		return JSON.stringify({ nodes: p.nodes, edges: p.edges });
+	}
 
 	let saveTimer: ReturnType<typeof setTimeout> | undefined;
 	$effect(() => {
@@ -112,9 +129,27 @@
 		edges;
 		clearTimeout(saveTimer);
 		saveTimer = setTimeout(() => {
-			untrack(() => pipelineStore.save(getSnapshot()));
+			untrack(() => {
+				const snap = getSnapshot();
+				pipelineStore.save(snap);
+				const sig = snapshotSignature(snap);
+				const now = Date.now();
+				if (sig !== lastSnapshotSig && now - lastSnapshotAt >= SNAPSHOT_MIN_SPACING_MS) {
+					pipelineMethods.addSnapshot(snap).then(() => {
+						lastSnapshotSig = sig;
+						lastSnapshotAt = now;
+					});
+				}
+			});
 		}, 500);
 		return () => clearTimeout(saveTimer);
+	});
+
+	onMount(() => {
+		lastSnapshotSig = snapshotSignature(getSnapshot());
+		// First edit always snapshots -- pretend the previous capture was
+		// just past the spacing window.
+		lastSnapshotAt = Date.now() - SNAPSHOT_MIN_SPACING_MS - 1;
 	});
 
 	// Auto-restart on routing changes only — effect params flow through
@@ -127,8 +162,7 @@
 				deviceId: (n.data as Record<string, unknown>).deviceId ?? null,
 				bundleId: (n.data as Record<string, unknown>).bundleId ?? null,
 				filePath: (n.data as Record<string, unknown>).filePath ?? null,
-				excludeCurrentApp: (n.data as Record<string, unknown>).excludeCurrentApp ?? null,
-				loopEnabled: (n.data as Record<string, unknown>).loopEnabled ?? null
+				excludeCurrentApp: (n.data as Record<string, unknown>).excludeCurrentApp ?? null
 			})),
 			edges: edges.map((e) => ({
 				id: e.id,
@@ -176,14 +210,48 @@
 		e.preventDefault();
 	}
 
+	// Auto-stop the pipeline when every AudioFile source has reached EOF and
+	// no live capture (mic / system / app) is running. Mixed graphs keep
+	// running so live recording survives the file finishing.
+	const LIVE_INPUT_TYPES = ['microphone', 'systemAudio', 'appAudio'];
+	let audioFileDone = $state<Record<string, boolean>>({});
+
+	$effect(() => {
+		if (!audioStore.isRunning) {
+			audioFileDone = {};
+		}
+	});
+
+	interface AudioFileProgress {
+		nodeId: string;
+		stopped: boolean;
+	}
+
+	let unlistenAudioFile: UnlistenFn | undefined;
 	onMount(() => {
 		window.addEventListener('keydown', onWindowKeyDown, { capture: true });
+		listen<AudioFileProgress>('audio://audio_file_progress', (e) => {
+			const { nodeId, stopped } = e.payload;
+			if (!audioStore.isRunning) return;
+			audioFileDone[nodeId] = stopped;
+			if (!stopped) return;
+			const hasLive = nodes.some((n) => LIVE_INPUT_TYPES.includes(n.type ?? ''));
+			if (hasLive) return;
+			const audioFiles = nodes.filter((n) => n.type === 'audioFile');
+			if (audioFiles.length === 0) return;
+			if (audioFiles.every((n) => audioFileDone[n.id])) {
+				audioMethods.stopPipeline().catch(() => {});
+			}
+		}).then((fn) => {
+			unlistenAudioFile = fn;
+		});
 		return () => window.removeEventListener('keydown', onWindowKeyDown, { capture: true });
 	});
 
 	onDestroy(() => {
 		clearTimeout(saveTimer);
 		clearTimeout(restartTimer);
+		unlistenAudioFile?.();
 		if (pipelineStore.editorActions?.getSnapshot === getSnapshot) {
 			pipelineStore.editorActions = null;
 		}

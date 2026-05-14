@@ -44,6 +44,13 @@ pub enum Command {
         frame: i64,
         reply: Sender<AppResult<()>>,
     },
+    /// Toggle loop-on-EOF for an audio-file input. Silent no-op when the
+    /// node isn't an AudioFile.
+    SetAudioFileLoop {
+        node_id: String,
+        enabled: bool,
+        reply: Sender<AppResult<()>>,
+    },
 }
 
 pub fn run(rx: Receiver<Command>) {
@@ -106,6 +113,16 @@ pub fn run(rx: Receiver<Command>) {
             } => {
                 if let Some(p) = &active {
                     p.seek_audio_file(&node_id, frame);
+                }
+                let _ = reply.send(Ok(()));
+            }
+            Command::SetAudioFileLoop {
+                node_id,
+                enabled,
+                reply,
+            } => {
+                if let Some(p) = &active {
+                    p.set_audio_file_loop(&node_id, enabled);
                 }
                 let _ = reply.send(Ok(()));
             }

@@ -175,6 +175,17 @@ impl ActivePipeline {
         }
     }
 
+    /// Toggle loop-on-EOF for the audio-file input identified by `node_id`.
+    /// Silent no-op when the node isn't an AudioFile or the pipeline is
+    /// stopped.
+    pub fn set_audio_file_loop(&self, node_id: &str, enabled: bool) {
+        if let Some(state) = self.inputs.get(node_id) {
+            if let InputHandle::AudioFile(reader) = &state._handle {
+                reader.loop_enabled().store(enabled, Ordering::SeqCst);
+            }
+        }
+    }
+
     /// Stop and drop everything -- inputs, outputs, effects, meters. Used by
     /// `Drop` and by `reconcile` on the failure path so a half-applied
     /// pipeline doesn't keep running.

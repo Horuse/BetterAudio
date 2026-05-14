@@ -7,6 +7,7 @@
 	import { ActivationButton } from '$lib/modules/audio/ui';
 	import Header from '$lib/components/layout/header.svelte';
 	import Flow from '$lib/modules/flow';
+	import { SnapshotHistory, SavedIndicator } from '$lib/modules/flow/ui';
 
 	let pipeline = $state<Pipeline | null>(null);
 	let notFound = $state(false);
@@ -60,6 +61,8 @@
 				<span class="text-xs text-red-600">{audioStore.lastError}</span>
 			{/if}
 			{#if pipeline}
+				<SavedIndicator />
+				<SnapshotHistory pipelineId={pipeline.id} />
 				<ActivationButton />
 			{/if}
 		</div>

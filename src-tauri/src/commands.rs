@@ -157,6 +157,26 @@ pub fn seek_audio_file(
 }
 
 #[tauri::command]
+pub fn set_audio_file_loop(
+    node_id: String,
+    enabled: bool,
+    state: State<'_, AppState>,
+) -> AppResult<()> {
+    let (reply_tx, reply_rx) = mpsc::channel();
+    state
+        .audio_tx
+        .send(Command::SetAudioFileLoop {
+            node_id,
+            enabled,
+            reply: reply_tx,
+        })
+        .map_err(|_| AppError::Stream("audio thread is gone".into()))?;
+    reply_rx
+        .recv()
+        .map_err(|_| AppError::Stream("audio thread reply lost".into()))?
+}
+
+#[tauri::command]
 pub fn stop_pipeline(state: State<'_, AppState>, app: AppHandle) -> AppResult<()> {
     let (reply_tx, reply_rx) = mpsc::channel();
     state

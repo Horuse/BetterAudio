@@ -25,14 +25,16 @@ pub(super) struct AudioFileReader {
     stop: Arc<AtomicBool>,
     join: Option<JoinHandle<()>>,
     seek_to: Arc<AtomicI64>,
-    /// Held so the reader thread's clone stays valid.
-    #[allow(dead_code)]
     loop_enabled: Arc<AtomicBool>,
 }
 
 impl AudioFileReader {
     pub(super) fn seek_to(&self) -> Arc<AtomicI64> {
         self.seek_to.clone()
+    }
+
+    pub(super) fn loop_enabled(&self) -> Arc<AtomicBool> {
+        self.loop_enabled.clone()
     }
 }
 

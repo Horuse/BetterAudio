@@ -4,11 +4,14 @@ import type { NodeKind, Pipeline } from './types';
 export type EditorActions = {
 	addNode: (kind: NodeKind) => void;
 	getSnapshot: () => Pipeline | null;
+	revertToSnapshot: (p: Pipeline) => void;
 };
 
 class PipelineStore {
 	pipelines = $state<Pipeline[]>([]);
 	editorActions: EditorActions | null = null;
+	/** Wall-clock millis of the last successful auto-save. `0` before any. */
+	lastSavedAt = $state<number>(0);
 
 	async refresh(): Promise<void> {
 		this.pipelines = await methods.list();
@@ -16,6 +19,7 @@ class PipelineStore {
 
 	async save(p: Pipeline): Promise<void> {
 		await methods.save(p);
+		this.lastSavedAt = Date.now();
 		await this.refresh();
 	}
 

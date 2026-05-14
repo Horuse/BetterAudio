@@ -52,7 +52,6 @@ pub(super) enum ResolvedInput {
     AudioFile {
         sample_rate: u32,
         path: PathBuf,
-        loop_enabled: bool,
     },
 }
 
@@ -90,16 +89,12 @@ pub(super) fn resolve_input(inp: &ValidInput) -> AppResult<ResolvedInput> {
             sample_rate: SCK_SR,
             bundle_id: bundle_id.clone(),
         }),
-        InputSpec::AudioFile {
-            file_path,
-            loop_enabled,
-        } => {
+        InputSpec::AudioFile { file_path } => {
             let path = PathBuf::from(file_path);
             let info = probe_wav(&path)?;
             Ok(ResolvedInput::AudioFile {
                 sample_rate: info.sample_rate,
                 path,
-                loop_enabled: *loop_enabled,
             })
         }
     }
@@ -180,17 +175,15 @@ pub(super) fn start_input_stream(
                 "System/App Audio capture is only supported on macOS".into(),
             ))
         }
-        ResolvedInput::AudioFile {
-            path,
-            loop_enabled,
-            ..
-        } => {
+        ResolvedInput::AudioFile { path, .. } => {
+            // Loop is a runtime atomic, not in InputSpec; frontend syncs it
+            // via `set_audio_file_loop` after pipeline start.
             let reader = start_audio_file_reader(
                 node_id.to_string(),
                 path,
                 bridge,
                 meter,
-                loop_enabled,
+                false,
                 app.clone(),
             )?;
             Ok(InputHandle::AudioFile(reader))

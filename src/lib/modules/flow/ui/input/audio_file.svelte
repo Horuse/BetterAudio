@@ -44,6 +44,15 @@
 		}
 	});
 
+	// Toggle is a runtime atomic, not part of InputSpec -- syncing here
+	// keeps the reader's loop flag in lockstep with `data.loopEnabled`
+	// without a reconcile.
+	$effect(() => {
+		if (audioStore.isRunning && data.filePath) {
+			audioMethods.setAudioFileLoop(id, data.loopEnabled).catch(() => {});
+		}
+	});
+
 	onDestroy(() => unlisten?.());
 
 	async function chooseFile() {
