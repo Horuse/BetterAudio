@@ -26,6 +26,7 @@ use crate::audio::input_bridge::{broadcast_channel, BroadcastTx};
 use crate::error::{AppError, AppResult};
 
 mod dag;
+mod file_reader;
 mod input;
 mod meter;
 mod output;
@@ -161,6 +162,16 @@ impl ActivePipeline {
     pub fn update_effect(&self, node_id: &str, data: &serde_json::Value) {
         if let Some(control) = self.effect_controls.get(node_id) {
             control.apply_update(data);
+        }
+    }
+
+    /// Queue a seek on the audio-file input identified by `node_id`. Silent
+    /// no-op when the node isn't an AudioFile or the pipeline is stopped.
+    pub fn seek_audio_file(&self, node_id: &str, frame: i64) {
+        if let Some(state) = self.inputs.get(node_id) {
+            if let InputHandle::AudioFile(reader) = &state._handle {
+                reader.seek_to().store(frame.max(0), Ordering::SeqCst);
+            }
         }
     }
 
@@ -518,7 +529,7 @@ impl ActivePipeline {
                     let slot = bridge_tx.add(prod)?;
                     bridges_by_output.entry(out_id).or_default().push(slot);
                 }
-                let handle = start_input_stream(resolved, bridge_rx, meter, &app)?;
+                let handle = start_input_stream(&input_id, resolved, bridge_rx, meter, &app)?;
                 self.inputs.insert(
                     input_id,
                     InputState {

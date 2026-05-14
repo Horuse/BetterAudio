@@ -1,3 +1,5 @@
+use std::path::PathBuf;
+
 use serde_json::json;
 use tauri::{AppHandle, Emitter};
 use tracing::info;
@@ -11,6 +13,7 @@ use crate::audio::streams;
 use crate::error::AppError;
 use crate::error::AppResult;
 
+use super::file_reader::{probe_wav, start_audio_file_reader, AudioFileReader};
 use super::STATE_EVENT;
 
 /// ScreenCaptureKit always delivers interleaved stereo by configuration.
@@ -20,14 +23,14 @@ const SCK_CHANNELS: usize = 2;
 /// resampling happens on the SCK delivery side.
 const SCK_SR: u32 = 48_000;
 
-/// Unified RAII handle for the different input source backends. The wrapped
-/// value is held only for its `Drop` side-effect: the cpal stream stops on
-/// drop, the SCK capture tears down the SCStream on drop.
+/// RAII handle held only for its `Drop` -- stops the cpal stream, tears
+/// down the SCStream, or signals + joins the file reader thread.
 #[allow(dead_code)]
 pub(super) enum InputHandle {
     Cpal(cpal::Stream),
     #[cfg(target_os = "macos")]
     Sck(crate::audio::sck_capture::SckCapture),
+    AudioFile(AudioFileReader),
 }
 
 pub(super) enum ResolvedInput {
@@ -46,6 +49,11 @@ pub(super) enum ResolvedInput {
         sample_rate: u32,
         bundle_id: String,
     },
+    AudioFile {
+        sample_rate: u32,
+        path: PathBuf,
+        loop_enabled: bool,
+    },
 }
 
 impl ResolvedInput {
@@ -54,6 +62,7 @@ impl ResolvedInput {
             ResolvedInput::Cpal { sample_rate, .. } => *sample_rate,
             ResolvedInput::SystemAudio { sample_rate, .. } => *sample_rate,
             ResolvedInput::AppAudio { sample_rate, .. } => *sample_rate,
+            ResolvedInput::AudioFile { sample_rate, .. } => *sample_rate,
         }
     }
 }
@@ -81,10 +90,23 @@ pub(super) fn resolve_input(inp: &ValidInput) -> AppResult<ResolvedInput> {
             sample_rate: SCK_SR,
             bundle_id: bundle_id.clone(),
         }),
+        InputSpec::AudioFile {
+            file_path,
+            loop_enabled,
+        } => {
+            let path = PathBuf::from(file_path);
+            let info = probe_wav(&path)?;
+            Ok(ResolvedInput::AudioFile {
+                sample_rate: info.sample_rate,
+                path,
+                loop_enabled: *loop_enabled,
+            })
+        }
     }
 }
 
 pub(super) fn start_input_stream(
+    node_id: &str,
     resolved: ResolvedInput,
     bridge: BroadcastRx,
     meter: MeterHandle,
@@ -157,6 +179,21 @@ pub(super) fn start_input_stream(
             Err(AppError::Stream(
                 "System/App Audio capture is only supported on macOS".into(),
             ))
+        }
+        ResolvedInput::AudioFile {
+            path,
+            loop_enabled,
+            ..
+        } => {
+            let reader = start_audio_file_reader(
+                node_id.to_string(),
+                path,
+                bridge,
+                meter,
+                loop_enabled,
+                app.clone(),
+            )?;
+            Ok(InputHandle::AudioFile(reader))
         }
     }
 }

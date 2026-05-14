@@ -50,12 +50,16 @@ pub enum NodeKind {
     NoiseGate,
     Delay,
     Reverb,
+    AudioFile,
 }
 
 impl NodeKind {
     pub fn category(self) -> NodeCategory {
         match self {
-            NodeKind::Microphone | NodeKind::SystemAudio | NodeKind::AppAudio => NodeCategory::Input,
+            NodeKind::Microphone
+            | NodeKind::SystemAudio
+            | NodeKind::AppAudio
+            | NodeKind::AudioFile => NodeCategory::Input,
             NodeKind::Speaker | NodeKind::FileRecording => NodeCategory::Output,
             NodeKind::Gain
             | NodeKind::Mute
@@ -103,6 +107,15 @@ fn default_true() -> bool {
 #[ts(export)]
 pub struct AppAudioData {
     pub bundle_id: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct AudioFileData {
+    pub file_path: Option<String>,
+    #[serde(default)]
+    pub loop_enabled: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize, TS)]
@@ -300,6 +313,7 @@ pub enum InputSpec {
     Microphone { device_id: String },
     SystemAudio { exclude_current_app: bool },
     AppAudio { bundle_id: String },
+    AudioFile { file_path: String, loop_enabled: bool },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -499,6 +513,15 @@ impl GraphSpec {
                         bundle_id: data
                             .bundle_id
                             .ok_or_else(|| miss(&n.id, "App Audio has no application selected"))?,
+                    }
+                }
+                NodeKind::AudioFile => {
+                    let data: AudioFileData = parse(&n.data, "AudioFile")?;
+                    InputSpec::AudioFile {
+                        file_path: data
+                            .file_path
+                            .ok_or_else(|| miss(&n.id, "Audio File has no file selected"))?,
+                        loop_enabled: data.loop_enabled,
                     }
                 }
                 _ => unreachable!(),

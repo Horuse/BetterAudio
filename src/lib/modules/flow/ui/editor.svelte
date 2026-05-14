@@ -127,7 +127,8 @@
 				deviceId: (n.data as Record<string, unknown>).deviceId ?? null,
 				bundleId: (n.data as Record<string, unknown>).bundleId ?? null,
 				filePath: (n.data as Record<string, unknown>).filePath ?? null,
-				excludeCurrentApp: (n.data as Record<string, unknown>).excludeCurrentApp ?? null
+				excludeCurrentApp: (n.data as Record<string, unknown>).excludeCurrentApp ?? null,
+				loopEnabled: (n.data as Record<string, unknown>).loopEnabled ?? null
 			})),
 			edges: edges.map((e) => ({
 				id: e.id,

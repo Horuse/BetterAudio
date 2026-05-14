@@ -9,6 +9,7 @@ import type {
 import Microphone from '../ui/input/microphone.svelte';
 import SystemAudio from '../ui/input/system_audio.svelte';
 import AppAudio from '../ui/input/app_audio.svelte';
+import AudioFile from '../ui/input/audio_file.svelte';
 import Speaker from '../ui/output/speaker.svelte';
 import FileRecording from '../ui/output/file_recording.svelte';
 import Gain from '../ui/effect/gain.svelte';
@@ -64,6 +65,14 @@ export const registry: Record<NodeKind, NodeRegistryEntry> = {
 		description: 'Capture audio from a single running application.',
 		component: AppAudio,
 		defaultData: { bundleId: null }
+	}),
+	audioFile: entry<'audioFile'>({
+		kind: 'audioFile',
+		category: 'input',
+		label: 'Audio File',
+		description: 'Play a WAV file as a source. With no live inputs the pipeline runs faster than real time.',
+		component: AudioFile,
+		defaultData: { filePath: null, loopEnabled: false }
 	}),
 	speaker: entry<'speaker'>({
 		kind: 'speaker',

@@ -1,4 +1,5 @@
 import type { AppAudioData } from './generated/AppAudioData';
+import type { AudioFileData } from './generated/AudioFileData';
 import type { ChannelBalanceData } from './generated/ChannelBalanceData';
 import type { CompressorData } from './generated/CompressorData';
 import type { DelayData } from './generated/DelayData';
@@ -35,6 +36,7 @@ type XyData<T> = T & Record<string, unknown>;
 export type MicrophoneNodeData = XyData<MicrophoneData>;
 export type SystemAudioNodeData = XyData<SystemAudioData>;
 export type AppAudioNodeData = XyData<AppAudioData>;
+export type AudioFileNodeData = XyData<AudioFileData>;
 export type SpeakerNodeData = XyData<SpeakerData>;
 export type FileRecordingNodeData = XyData<FileRecordingData>;
 export type GainNodeData = XyData<GainData>;
@@ -57,6 +59,7 @@ export type NodeDataMap = {
 	microphone: MicrophoneNodeData;
 	systemAudio: SystemAudioNodeData;
 	appAudio: AppAudioNodeData;
+	audioFile: AudioFileNodeData;
 	speaker: SpeakerNodeData;
 	fileRecording: FileRecordingNodeData;
 	gain: GainNodeData;

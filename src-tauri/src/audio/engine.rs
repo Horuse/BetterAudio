@@ -37,6 +37,13 @@ pub enum Command {
         data: serde_json::Value,
         reply: Sender<AppResult<()>>,
     },
+    /// Seek an audio-file input to a given frame index. Silent no-op when
+    /// the node isn't an AudioFile.
+    SeekAudioFile {
+        node_id: String,
+        frame: i64,
+        reply: Sender<AppResult<()>>,
+    },
 }
 
 pub fn run(rx: Receiver<Command>) {
@@ -89,6 +96,16 @@ pub fn run(rx: Receiver<Command>) {
             } => {
                 if let Some(p) = &active {
                     p.update_effect(&node_id, &data);
+                }
+                let _ = reply.send(Ok(()));
+            }
+            Command::SeekAudioFile {
+                node_id,
+                frame,
+                reply,
+            } => {
+                if let Some(p) = &active {
+                    p.seek_audio_file(&node_id, frame);
                 }
                 let _ = reply.send(Ok(()));
             }

@@ -17,6 +17,10 @@
 //! allocator to free the ring buffer. `BroadcastTx::drain_discarded`
 //! collects the returned producers and drops them on main.
 
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::thread;
+use std::time::Duration;
+
 use rtrb::{Consumer, Producer, RingBuffer};
 
 use crate::audio::streams::bulk_push;
@@ -154,6 +158,40 @@ impl BroadcastRx {
         for slot in self.slots.iter_mut() {
             if let Some(p) = slot {
                 bulk_push(p, samples);
+            }
+        }
+    }
+
+    /// Push `samples` to every active slot without dropping on overflow --
+    /// sleeps `backoff` and retries until each consumer drains enough room.
+    /// NOT RT-safe; for offline / file-driven inputs where the consumer
+    /// pace dictates source throughput.
+    pub fn broadcast_blocking(&mut self, samples: &[f32], stop: &AtomicBool, backoff: Duration) {
+        self.apply_commands();
+        for slot in self.slots.iter_mut() {
+            let Some(p) = slot else { continue };
+            let mut written = 0;
+            while written < samples.len() {
+                if stop.load(Ordering::SeqCst) {
+                    return;
+                }
+                let avail = p.slots();
+                if avail == 0 {
+                    thread::sleep(backoff);
+                    continue;
+                }
+                let take = avail.min(samples.len() - written);
+                if let Ok(mut chunk) = p.write_chunk(take) {
+                    let (first, second) = chunk.as_mut_slices();
+                    let n1 = first.len();
+                    first.copy_from_slice(&samples[written..written + n1]);
+                    let n2 = second.len();
+                    if n2 > 0 {
+                        second.copy_from_slice(&samples[written + n1..written + n1 + n2]);
+                    }
+                    chunk.commit_all();
+                    written += take;
+                }
             }
         }
     }

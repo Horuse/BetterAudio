@@ -30,6 +30,9 @@ export const methods = {
 	/** No-op when the pipeline isn't running; callers can fire-and-forget. */
 	updateEffect: (nodeId: string, data: Record<string, unknown>): Promise<void> =>
 		invoke('update_effect', { nodeId, data }),
+	/** Seek an AudioFile input. No-op when not running. */
+	seekAudioFile: (nodeId: string, frame: number): Promise<void> =>
+		invoke('seek_audio_file', { nodeId, frame }),
 	/** `null` when the device has no software-settable volume in that scope. */
 	getDeviceVolume: (kind: 'input' | 'output', name: string): Promise<number | null> =>
 		invoke<number | null>('get_device_volume', { kind, name }),

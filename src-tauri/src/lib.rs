@@ -30,6 +30,7 @@ pub fn run() {
             commands::stop_pipeline,
             commands::reconcile_pipeline,
             commands::update_effect,
+            commands::seek_audio_file,
             commands::get_device_volume,
             commands::set_device_volume,
         ])
