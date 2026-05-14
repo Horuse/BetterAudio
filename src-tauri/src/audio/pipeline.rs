@@ -7,7 +7,7 @@
 //!   sources + effects reachable backward from that output. A `DspWorker`
 //!   thread mixes one block per real-time deadline and hands it off to:
 //!     * Speaker: a stereo SPSC ring that the cpal output callback drains.
-//!     * File: a `hound::WavWriter`.
+//!     * File: a crash-resistant `WavRecorder` (patches header on each flush).
 //! - Effects with multiple incoming edges act as mixer-buses (sum first,
 //!   then apply DSP). Effects are constrained to at most one outgoing edge
 //!   in the validator.
@@ -118,13 +118,14 @@ impl Drop for RecorderWorker {
     }
 }
 
-/// Fixed-capacity ring used as a staging FIFO. Allocates once, no reallocs.
-/// Debug-assert on overrun keeps capacity sizing honest.
+/// Fixed-capacity FIFO; allocates once. Overrun clamps and counts drops —
+/// wrapping the write head past the read head would corrupt subsequent pops.
 struct StagingRing {
     buf: Box<[f32]>,
     head: usize,
     tail: usize,
     len: usize,
+    dropped: u64,
 }
 
 impl StagingRing {
@@ -134,12 +135,19 @@ impl StagingRing {
             head: 0,
             tail: 0,
             len: 0,
+            dropped: 0,
         }
     }
 
     #[inline]
     fn len(&self) -> usize {
         self.len
+    }
+
+    #[allow(dead_code)]
+    #[inline]
+    fn dropped(&self) -> u64 {
+        self.dropped
     }
 
     fn pop_into(&mut self, dst: &mut [f32]) -> usize {
@@ -154,19 +162,22 @@ impl StagingRing {
     }
 
     fn extend_from_slice(&mut self, src: &[f32]) {
+        let cap = self.buf.len();
+        let free = cap - self.len;
         debug_assert!(
-            self.len + src.len() <= self.buf.len(),
+            src.len() <= free,
             "StagingRing overrun: have {} + {} new > cap {}",
             self.len,
             src.len(),
-            self.buf.len()
+            cap
         );
-        let cap = self.buf.len();
-        for &v in src {
+        let take = src.len().min(free);
+        for &v in &src[..take] {
             self.buf[self.tail] = v;
             self.tail = if self.tail + 1 == cap { 0 } else { self.tail + 1 };
         }
-        self.len += src.len();
+        self.len += take;
+        self.dropped = self.dropped.saturating_add((src.len() - take) as u64);
     }
 }
 
@@ -1307,9 +1318,7 @@ fn start_recorder_worker(
     let join = thread::Builder::new()
         .name(format!("recorder:{}", path.display()))
         .spawn(move || {
-            // Periodic flush so a crash loses at most ~2s of audio. RIFF
-            // header still needs ffmpeg-style recovery on crash (hound only
-            // writes it at finalize), but the PCM bytes are safe.
+            // A crash loses at most one flush interval of audio.
             const FLUSH_INTERVAL: Duration = Duration::from_secs(2);
             const PROGRESS_INTERVAL: Duration = Duration::from_millis(250);
             let mut last_flush = std::time::Instant::now();

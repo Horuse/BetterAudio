@@ -8,13 +8,14 @@
 //! All public functions block on Swift's async start completion via a
 //! `DispatchSemaphore` on the Swift side; the wait is bounded (10 s).
 
+use std::cell::UnsafeCell;
 use std::ffi::{c_void, CString};
+use std::mem;
 use std::os::raw::c_char;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Mutex;
 
 use rtrb::Producer;
-use tracing::info;
+use tracing::{info, warn};
 
 use crate::error::{AppError, AppResult};
 
@@ -82,27 +83,31 @@ extern "C" {
         callback: SampleCallback,
         user_data: *mut c_void,
     ) -> i32;
-    fn ba_sck_stop(handle: *mut c_void);
+    /// 0 = clean stop; nonzero = Swift's 5 s `stopCapture` timeout fired and
+    /// the dispatch queue may still call back, so do not free `user_data`.
+    fn ba_sck_stop(handle: *mut c_void) -> i32;
 }
 
 pub struct SckCapture {
     handle: *mut c_void,
-    /// Kept alive for Drop order: `ba_sck_stop` guarantees no more callbacks
-    /// before the box is dropped.
-    _state: Box<CallbackState>,
+    /// Leaked via `mem::forget` on stop timeout — Swift queue may still deref
+    /// the user_data pointer.
+    state: Option<Box<CallbackState>>,
 }
 
 unsafe impl Send for SckCapture {}
 
 struct CallbackState {
     label: String,
-    /// One producer per bridge that subscribes to this SCK source. Wrapped in
-    /// `Mutex` only because rtrb's `Producer<f32>` is `!Sync` — SCK delivers
-    /// buffers on a serial dispatch queue, so the mutex is uncontended.
-    producers: Mutex<Vec<Producer<f32>>>,
-    /// One-shot log so we can confirm SCK actually fires for this source.
+    /// `UnsafeCell` (not `Mutex`) — SCK serial queue is the only mutator;
+    /// avoids the kernel call `Mutex::lock` can take under priority inversion.
+    producers: UnsafeCell<Vec<Producer<f32>>>,
     first_call_logged: AtomicBool,
 }
+
+// SAFETY: `producers` is only touched by `sample_trampoline` on the SCK
+// serial queue; no other access after `start_*` returns.
+unsafe impl Sync for CallbackState {}
 
 extern "C" fn sample_trampoline(
     user_data: *mut c_void,
@@ -124,9 +129,8 @@ extern "C" fn sample_trampoline(
     }
     let n = (frames as usize) * (channels as usize);
     let slice = unsafe { std::slice::from_raw_parts(samples, n) };
-    let Ok(mut producers) = state.producers.lock() else {
-        return;
-    };
+    // SAFETY: see Sync impl on CallbackState.
+    let producers = unsafe { &mut *state.producers.get() };
     for prod in producers.iter_mut() {
         crate::audio::streams::bulk_push(prod, slice);
     }
@@ -146,7 +150,7 @@ impl SckCapture {
 
         let state = Box::new(CallbackState {
             label: format!("app:{bundle_id}"),
-            producers: Mutex::new(producers),
+            producers: UnsafeCell::new(producers),
             first_call_logged: AtomicBool::new(false),
         });
         let state_ptr = state.as_ref() as *const CallbackState as *mut c_void;
@@ -172,7 +176,7 @@ impl SckCapture {
 
         Ok(SckCapture {
             handle,
-            _state: state,
+            state: Some(state),
         })
     }
 
@@ -192,7 +196,7 @@ impl SckCapture {
 
         let state = Box::new(CallbackState {
             label: "system".to_string(),
-            producers: Mutex::new(producers),
+            producers: UnsafeCell::new(producers),
             first_call_logged: AtomicBool::new(false),
         });
         let state_ptr = state.as_ref() as *const CallbackState as *mut c_void;
@@ -215,16 +219,23 @@ impl SckCapture {
 
         Ok(SckCapture {
             handle,
-            _state: state,
+            state: Some(state),
         })
     }
 }
 
 impl Drop for SckCapture {
     fn drop(&mut self) {
-        unsafe {
-            ba_sck_stop(self.handle);
-            ba_sck_destroy(self.handle);
+        let timed_out = unsafe { ba_sck_stop(self.handle) } != 0;
+        unsafe { ba_sck_destroy(self.handle) };
+        if let Some(state) = self.state.take() {
+            if timed_out {
+                warn!(
+                    label = %state.label,
+                    "SCK stop timed out — leaking CallbackState to avoid UAF"
+                );
+                mem::forget(state);
+            }
         }
     }
 }

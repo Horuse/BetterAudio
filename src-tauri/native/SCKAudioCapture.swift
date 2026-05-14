@@ -302,14 +302,19 @@ public func ba_sck_start_system(
     return RESULT_OS_VERSION
 }
 
+/// Returns 0 on clean stop (no further callbacks will fire), 1 on timeout
+/// (Swift's queue may still drain pending sample buffers — Rust caller must
+/// not free user_data in this case).
 @_cdecl("ba_sck_stop")
-public func ba_sck_stop(_ handle: OpaquePointer) {
+public func ba_sck_stop(_ handle: OpaquePointer) -> Int32 {
     if #available(macOS 13.0, *) {
         let inst = Unmanaged<Capture>.fromOpaque(UnsafeRawPointer(handle)).takeUnretainedValue()
         let sem = DispatchSemaphore(value: 0)
         inst.stop {
             sem.signal()
         }
-        _ = sem.wait(timeout: .now() + .seconds(5))
+        let result = sem.wait(timeout: .now() + .seconds(5))
+        return result == .success ? 0 : 1
     }
+    return 0
 }

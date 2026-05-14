@@ -59,7 +59,6 @@ pub enum EffectControl {
     Limiter {
         ceiling: Arc<AtomicU32>,
         drive: Arc<AtomicU32>,
-        inv_ceiling: Arc<AtomicU32>,
     },
     Eq {
         /// One gain atomic per ISO octave band; see EQ_FREQUENCIES_HZ for order.
@@ -90,15 +89,10 @@ impl EffectControl {
                     store_f32(right, db_to_linear(db));
                 }
             }
-            EffectControl::Limiter {
-                ceiling,
-                drive,
-                inv_ceiling,
-            } => {
+            EffectControl::Limiter { ceiling, drive } => {
                 if let Some(db) = num(data, "thresholdDb") {
                     let c = db_to_linear(db).max(1e-6);
                     store_f32(ceiling, c);
-                    store_f32(inv_ceiling, 1.0 / c);
                 }
                 if let Some(db) = num(data, "driveDb") {
                     store_f32(drive, db_to_linear(db));
@@ -133,30 +127,52 @@ fn load_f32(slot: &AtomicU32) -> f32 {
 
 pub struct GainEffect {
     linear: Arc<AtomicU32>,
+    current: f32,
 }
 
 impl GainEffect {
     fn new(d: GainData) -> (Self, EffectControl) {
-        let linear = Arc::new(AtomicU32::new(db_to_linear(d.gain_db).to_bits()));
+        let initial = db_to_linear(d.gain_db);
+        let linear = Arc::new(AtomicU32::new(initial.to_bits()));
         let control = EffectControl::Gain {
             linear: linear.clone(),
         };
-        (Self { linear }, control)
+        (
+            Self {
+                linear,
+                current: initial,
+            },
+            control,
+        )
     }
 }
 
 impl Effect for GainEffect {
     #[inline]
     fn process(&mut self, samples: &mut [f32], frames: usize) {
-        let g = load_f32(&self.linear);
-        for s in &mut samples[..frames * 2] {
-            *s *= g;
+        let target = load_f32(&self.linear);
+        let stereo = &mut samples[..frames * 2];
+        if (self.current - target).abs() < 1e-7 {
+            for s in stereo {
+                *s *= target;
+            }
+            self.current = target;
+            return;
         }
+        let step = (target - self.current) / frames as f32;
+        let mut g = self.current;
+        for frame in stereo.chunks_exact_mut(2) {
+            g += step;
+            frame[0] *= g;
+            frame[1] *= g;
+        }
+        self.current = target;
     }
 }
 
 pub struct MuteEffect {
     muted: Arc<AtomicBool>,
+    current: f32,
 }
 
 impl MuteEffect {
@@ -165,19 +181,38 @@ impl MuteEffect {
         let control = EffectControl::Mute {
             muted: muted.clone(),
         };
-        (Self { muted }, control)
+        (
+            Self {
+                current: if d.muted { 0.0 } else { 1.0 },
+                muted,
+            },
+            control,
+        )
     }
 }
 
 impl Effect for MuteEffect {
     #[inline]
     fn process(&mut self, samples: &mut [f32], frames: usize) {
-        if !self.muted.load(Ordering::Relaxed) {
+        let target = if self.muted.load(Ordering::Relaxed) { 0.0 } else { 1.0 };
+        if self.current >= 1.0 && target >= 1.0 {
             return;
         }
-        for s in &mut samples[..frames * 2] {
-            *s = 0.0;
+        let stereo = &mut samples[..frames * 2];
+        if self.current <= 0.0 && target <= 0.0 {
+            for s in stereo {
+                *s = 0.0;
+            }
+            return;
         }
+        let step = (target - self.current) / frames as f32;
+        let mut g = self.current;
+        for frame in stereo.chunks_exact_mut(2) {
+            g += step;
+            frame[0] *= g;
+            frame[1] *= g;
+        }
+        self.current = target;
     }
 }
 
@@ -316,7 +351,6 @@ impl Effect for LevelMeterEffect {
 pub struct LimiterEffect {
     ceiling: Arc<AtomicU32>,
     drive: Arc<AtomicU32>,
-    inv_ceiling: Arc<AtomicU32>,
 }
 
 impl LimiterEffect {
@@ -324,29 +358,21 @@ impl LimiterEffect {
         let c = db_to_linear(d.threshold_db).max(1e-6);
         let ceiling = Arc::new(AtomicU32::new(c.to_bits()));
         let drive = Arc::new(AtomicU32::new(db_to_linear(d.drive_db).to_bits()));
-        let inv_ceiling = Arc::new(AtomicU32::new((1.0 / c).to_bits()));
         let control = EffectControl::Limiter {
             ceiling: ceiling.clone(),
             drive: drive.clone(),
-            inv_ceiling: inv_ceiling.clone(),
         };
-        (
-            Self {
-                ceiling,
-                drive,
-                inv_ceiling,
-            },
-            control,
-        )
+        (Self { ceiling, drive }, control)
     }
 }
 
 impl Effect for LimiterEffect {
     #[inline]
     fn process(&mut self, samples: &mut [f32], frames: usize) {
-        let c = load_f32(&self.ceiling);
+        // No `inv_ceiling` cache — RT could read NEW_c with OLD_inv_c (torn pair).
+        let c = load_f32(&self.ceiling).max(1e-6);
         let d = load_f32(&self.drive);
-        let inv_c = load_f32(&self.inv_ceiling);
+        let inv_c = 1.0 / c;
         let stereo = &mut samples[..frames * 2];
         for s in stereo {
             *s = c * fast_tanh(*s * d * inv_c);
@@ -556,6 +582,7 @@ pub fn instantiate_effect(
         EffectSpec::Gain(d) => match registry.controls.get(node_id) {
             Some(EffectControl::Gain { linear }) => EffectBuild {
                 effect: RuntimeEffect::Gain(GainEffect {
+                    current: load_f32(linear),
                     linear: linear.clone(),
                 }),
                 control: None,
@@ -574,6 +601,7 @@ pub fn instantiate_effect(
         EffectSpec::Mute(d) => match registry.controls.get(node_id) {
             Some(EffectControl::Mute { muted }) => EffectBuild {
                 effect: RuntimeEffect::Mute(MuteEffect {
+                    current: if muted.load(Ordering::Relaxed) { 0.0 } else { 1.0 },
                     muted: muted.clone(),
                 }),
                 control: None,
@@ -609,15 +637,10 @@ pub fn instantiate_effect(
             }
         },
         EffectSpec::Limiter(d) => match registry.controls.get(node_id) {
-            Some(EffectControl::Limiter {
-                ceiling,
-                drive,
-                inv_ceiling,
-            }) => EffectBuild {
+            Some(EffectControl::Limiter { ceiling, drive }) => EffectBuild {
                 effect: RuntimeEffect::Limiter(LimiterEffect {
                     ceiling: ceiling.clone(),
                     drive: drive.clone(),
-                    inv_ceiling: inv_ceiling.clone(),
                 }),
                 control: None,
                 meter: None,
