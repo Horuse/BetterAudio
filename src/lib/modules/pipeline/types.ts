@@ -11,7 +11,8 @@ export type NodeKind =
 	| 'channelBalance'
 	| 'limiter'
 	| 'eq'
-	| 'levelMeter';
+	| 'levelMeter'
+	| 'lufsMeter';
 
 export interface MicrophoneNodeData extends Record<string, unknown> {
 	deviceId: string | null;
@@ -60,6 +61,11 @@ export interface LevelMeterNodeData extends Record<string, unknown> {
 	// no params yet — just visualises the live signal
 }
 
+export interface LufsMeterNodeData extends Record<string, unknown> {
+	/** Compliance target LUFS for the Integrated readout colour, or `null` for free mode. */
+	target: number | null;
+}
+
 export type NodeDataMap = {
 	microphone: MicrophoneNodeData;
 	systemAudio: SystemAudioNodeData;
@@ -72,6 +78,7 @@ export type NodeDataMap = {
 	limiter: LimiterNodeData;
 	eq: EqNodeData;
 	levelMeter: LevelMeterNodeData;
+	lufsMeter: LufsMeterNodeData;
 };
 
 export type AnyNodeData = NodeDataMap[NodeKind];

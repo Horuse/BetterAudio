@@ -10,8 +10,11 @@ use std::sync::Arc;
 
 use serde_json::Value;
 
+use ebur128::{EbuR128, Mode};
+
 use crate::audio::graph::{
-    ChannelBalanceData, EffectSpec, EqData, GainData, LevelMeterData, LimiterData, MuteData,
+    ChannelBalanceData, EffectSpec, EqData, GainData, LevelMeterData, LimiterData, LufsMeterData,
+    MuteData,
 };
 
 pub trait Effect: Send {
@@ -28,6 +31,7 @@ pub enum RuntimeEffect {
     Limiter(LimiterEffect),
     Eq(EqEffect),
     LevelMeter(LevelMeterEffect),
+    LufsMeter(LufsMeterEffect),
 }
 
 impl RuntimeEffect {
@@ -40,6 +44,7 @@ impl RuntimeEffect {
             RuntimeEffect::Limiter(e) => e.process(samples, frames),
             RuntimeEffect::Eq(e) => e.process(samples, frames),
             RuntimeEffect::LevelMeter(e) => e.process(samples, frames),
+            RuntimeEffect::LufsMeter(e) => e.process(samples, frames),
         }
     }
 }
@@ -271,6 +276,16 @@ pub struct MeterSnapshot {
 pub const METER_PEAK_DECAY: f32 = 0.85;
 
 impl MeterHandle {
+    pub fn new(node_id: String) -> Self {
+        Self {
+            node_id,
+            peak_l: Arc::new(AtomicU32::new(0)),
+            peak_r: Arc::new(AtomicU32::new(0)),
+            rms_l: Arc::new(AtomicU32::new(0)),
+            rms_r: Arc::new(AtomicU32::new(0)),
+        }
+    }
+
     /// Snapshot current values and decay the peak — called from the engine's
     /// tick thread.
     pub fn snapshot_and_decay(&self) -> MeterSnapshot {
@@ -310,39 +325,172 @@ impl LevelMeterEffect {
 impl Effect for LevelMeterEffect {
     #[inline]
     fn process(&mut self, samples: &mut [f32], frames: usize) {
+        update_meter(&self.handle, &samples[..frames * 2]);
+    }
+}
+
+/// `stereo` is interleaved L/R f32; odd-length truncates the trailing half-frame.
+pub fn update_meter(handle: &MeterHandle, stereo: &[f32]) {
+    let frames = stereo.len() / 2;
+    if frames == 0 {
+        return;
+    }
+    let stereo = &stereo[..frames * 2];
+    let mut peak_l = 0.0f32;
+    let mut peak_r = 0.0f32;
+    let mut sum_l_sq = 0.0f64;
+    let mut sum_r_sq = 0.0f64;
+    for frame in stereo.chunks_exact(2) {
+        let l = frame[0];
+        let r = frame[1];
+        let al = l.abs();
+        let ar = r.abs();
+        if al > peak_l {
+            peak_l = al;
+        }
+        if ar > peak_r {
+            peak_r = ar;
+        }
+        sum_l_sq += (l as f64) * (l as f64);
+        sum_r_sq += (r as f64) * (r as f64);
+    }
+    let existing_l = load_f32(&handle.peak_l);
+    let existing_r = load_f32(&handle.peak_r);
+    store_f32(&handle.peak_l, existing_l.max(peak_l));
+    store_f32(&handle.peak_r, existing_r.max(peak_r));
+    let rms_l = (sum_l_sq / frames as f64).sqrt() as f32;
+    let rms_r = (sum_r_sq / frames as f64).sqrt() as f32;
+    store_f32(&handle.rms_l, rms_l);
+    store_f32(&handle.rms_r, rms_r);
+}
+
+/// Tauri's serde_json cannot serialize non-finite f32 — silent input emits
+/// this sub-audible floor instead.
+pub const LUFS_SILENT: f32 = -120.0;
+
+pub struct LufsMeterEffect {
+    ebu: EbuR128,
+    handle: LufsHandle,
+    /// `loudness_global` iterates the entire stored block history (O(N)),
+    /// so we throttle it to ~once per second.
+    frames_since_global: usize,
+    sample_rate: u32,
+}
+
+#[derive(Clone)]
+pub struct LufsHandle {
+    pub node_id: String,
+    pub momentary: Arc<AtomicU32>,
+    pub shortterm: Arc<AtomicU32>,
+    pub integrated: Arc<AtomicU32>,
+    /// 4×-oversampled true peak (dBTP, per ITU-R BS.1770) — catches
+    /// inter-sample peaks invisible to a sample-domain meter.
+    pub tp_l: Arc<AtomicU32>,
+    pub tp_r: Arc<AtomicU32>,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct LufsSnapshot {
+    pub momentary: f32,
+    pub shortterm: f32,
+    pub integrated: f32,
+    pub tp_l: f32,
+    pub tp_r: f32,
+}
+
+impl LufsHandle {
+    pub fn snapshot(&self) -> LufsSnapshot {
+        LufsSnapshot {
+            momentary: load_f32(&self.momentary),
+            shortterm: load_f32(&self.shortterm),
+            integrated: load_f32(&self.integrated),
+            tp_l: load_f32(&self.tp_l),
+            tp_r: load_f32(&self.tp_r),
+        }
+    }
+}
+
+const LUFS_MODE: Mode = Mode::I.union(Mode::M).union(Mode::S).union(Mode::TRUE_PEAK);
+
+impl LufsMeterEffect {
+    fn new(_d: LufsMeterData, node_id: String, sample_rate: u32) -> (Self, LufsHandle) {
+        let ebu = EbuR128::new(2, sample_rate, LUFS_MODE)
+            .expect("ebur128 init: stereo + valid sample rate");
+        let handle = LufsHandle {
+            node_id,
+            momentary: Arc::new(AtomicU32::new(LUFS_SILENT.to_bits())),
+            shortterm: Arc::new(AtomicU32::new(LUFS_SILENT.to_bits())),
+            integrated: Arc::new(AtomicU32::new(LUFS_SILENT.to_bits())),
+            tp_l: Arc::new(AtomicU32::new(LUFS_SILENT.to_bits())),
+            tp_r: Arc::new(AtomicU32::new(LUFS_SILENT.to_bits())),
+        };
+        (
+            Self {
+                ebu,
+                handle: handle.clone(),
+                frames_since_global: 0,
+                sample_rate,
+            },
+            handle,
+        )
+    }
+
+    fn from_handle(handle: LufsHandle, sample_rate: u32) -> Self {
+        let ebu = EbuR128::new(2, sample_rate, LUFS_MODE)
+            .expect("ebur128 init: stereo + valid sample rate");
+        Self {
+            ebu,
+            handle,
+            frames_since_global: 0,
+            sample_rate,
+        }
+    }
+}
+
+impl Effect for LufsMeterEffect {
+    fn process(&mut self, samples: &mut [f32], frames: usize) {
         if frames == 0 {
             return;
         }
-        let stereo = &samples[..frames * 2];
-        let mut peak_l = 0.0f32;
-        let mut peak_r = 0.0f32;
-        let mut sum_l_sq = 0.0f64;
-        let mut sum_r_sq = 0.0f64;
-        for frame in stereo.chunks_exact(2) {
-            let l = frame[0];
-            let r = frame[1];
-            let al = l.abs();
-            let ar = r.abs();
-            if al > peak_l {
-                peak_l = al;
-            }
-            if ar > peak_r {
-                peak_r = ar;
-            }
-            sum_l_sq += (l as f64) * (l as f64);
-            sum_r_sq += (r as f64) * (r as f64);
+        // ebur128's internal buffers are pre-allocated by `new` — `add_frames`
+        // stays alloc-free on the RT path.
+        let _ = self.ebu.add_frames_f32(&samples[..frames * 2]);
+        let m = self.ebu.loudness_momentary().unwrap_or(f64::NEG_INFINITY);
+        let s = self.ebu.loudness_shortterm().unwrap_or(f64::NEG_INFINITY);
+        store_f32(&self.handle.momentary, sanitize_lufs(m));
+        store_f32(&self.handle.shortterm, sanitize_lufs(s));
+
+        let tp_l = self.ebu.true_peak(0).unwrap_or(0.0);
+        let tp_r = self.ebu.true_peak(1).unwrap_or(0.0);
+        store_f32(&self.handle.tp_l, amp_to_db(tp_l));
+        store_f32(&self.handle.tp_r, amp_to_db(tp_r));
+
+        self.frames_since_global += frames;
+        if self.frames_since_global >= self.sample_rate as usize {
+            let i = self.ebu.loudness_global().unwrap_or(f64::NEG_INFINITY);
+            store_f32(&self.handle.integrated, sanitize_lufs(i));
+            self.frames_since_global = 0;
         }
-        // Peak: write the larger of (existing, this block) so the tick thread
-        // sees the true peak between samples.
-        let existing_l = load_f32(&self.handle.peak_l);
-        let existing_r = load_f32(&self.handle.peak_r);
-        store_f32(&self.handle.peak_l, existing_l.max(peak_l));
-        store_f32(&self.handle.peak_r, existing_r.max(peak_r));
-        // RMS: replace with this block's value — short window, snappy UI.
-        let rms_l = (sum_l_sq / frames as f64).sqrt() as f32;
-        let rms_r = (sum_r_sq / frames as f64).sqrt() as f32;
-        store_f32(&self.handle.rms_l, rms_l);
-        store_f32(&self.handle.rms_r, rms_r);
+    }
+}
+
+#[inline]
+fn sanitize_lufs(v: f64) -> f32 {
+    let v = v as f32;
+    if v.is_finite() {
+        v.max(LUFS_SILENT)
+    } else {
+        LUFS_SILENT
+    }
+}
+
+#[inline]
+fn amp_to_db(amp: f64) -> f32 {
+    let a = amp as f32;
+    if a > 1e-6 {
+        (20.0 * a.log10()).max(LUFS_SILENT)
+    } else {
+        LUFS_SILENT
     }
 }
 
@@ -556,6 +704,8 @@ pub struct EffectBuild {
     pub control: Option<EffectControl>,
     /// Some only on the first instantiation per node id.
     pub meter: Option<MeterHandle>,
+    /// Some only on the first instantiation per node id.
+    pub lufs: Option<LufsHandle>,
 }
 
 /// Shared atomics keyed by node id so a fan-out effect (one node feeding
@@ -564,6 +714,7 @@ pub struct EffectBuild {
 pub struct EffectRegistry {
     controls: std::collections::HashMap<String, EffectControl>,
     meters: std::collections::HashMap<String, MeterHandle>,
+    lufs: std::collections::HashMap<String, LufsHandle>,
 }
 
 impl EffectRegistry {
@@ -587,6 +738,7 @@ pub fn instantiate_effect(
                 }),
                 control: None,
                 meter: None,
+                lufs: None,
             },
             _ => {
                 let (e, c) = GainEffect::new(d);
@@ -595,6 +747,7 @@ pub fn instantiate_effect(
                     effect: RuntimeEffect::Gain(e),
                     control: Some(c),
                     meter: None,
+                    lufs: None,
                 }
             }
         },
@@ -606,6 +759,7 @@ pub fn instantiate_effect(
                 }),
                 control: None,
                 meter: None,
+                lufs: None,
             },
             _ => {
                 let (e, c) = MuteEffect::new(d);
@@ -614,6 +768,7 @@ pub fn instantiate_effect(
                     effect: RuntimeEffect::Mute(e),
                     control: Some(c),
                     meter: None,
+                    lufs: None,
                 }
             }
         },
@@ -625,6 +780,7 @@ pub fn instantiate_effect(
                 }),
                 control: None,
                 meter: None,
+                lufs: None,
             },
             _ => {
                 let (e, c) = ChannelBalanceEffect::new(d);
@@ -633,6 +789,7 @@ pub fn instantiate_effect(
                     effect: RuntimeEffect::ChannelBalance(e),
                     control: Some(c),
                     meter: None,
+                    lufs: None,
                 }
             }
         },
@@ -644,6 +801,7 @@ pub fn instantiate_effect(
                 }),
                 control: None,
                 meter: None,
+                lufs: None,
             },
             _ => {
                 let (e, c) = LimiterEffect::new(d);
@@ -652,6 +810,7 @@ pub fn instantiate_effect(
                     effect: RuntimeEffect::Limiter(e),
                     control: Some(c),
                     meter: None,
+                    lufs: None,
                 }
             }
         },
@@ -660,6 +819,7 @@ pub fn instantiate_effect(
                 effect: RuntimeEffect::Eq(EqEffect::from_gains(gains.clone(), sample_rate)),
                 control: None,
                 meter: None,
+                lufs: None,
             },
             _ => {
                 let (e, c) = EqEffect::new(d, sample_rate);
@@ -668,6 +828,7 @@ pub fn instantiate_effect(
                     effect: RuntimeEffect::Eq(e),
                     control: Some(c),
                     meter: None,
+                    lufs: None,
                 }
             }
         },
@@ -678,6 +839,7 @@ pub fn instantiate_effect(
                 }),
                 control: None,
                 meter: None,
+                lufs: None,
             },
             None => {
                 let (e, handle) = LevelMeterEffect::new(d, node_id.to_string());
@@ -686,6 +848,28 @@ pub fn instantiate_effect(
                     effect: RuntimeEffect::LevelMeter(e),
                     control: None,
                     meter: Some(handle),
+                    lufs: None,
+                }
+            }
+        },
+        EffectSpec::LufsMeter(d) => match registry.lufs.get(node_id) {
+            Some(handle) => EffectBuild {
+                effect: RuntimeEffect::LufsMeter(LufsMeterEffect::from_handle(
+                    handle.clone(),
+                    sample_rate,
+                )),
+                control: None,
+                meter: None,
+                lufs: None,
+            },
+            None => {
+                let (e, handle) = LufsMeterEffect::new(d, node_id.to_string(), sample_rate);
+                registry.lufs.insert(node_id.to_string(), handle.clone());
+                EffectBuild {
+                    effect: RuntimeEffect::LufsMeter(e),
+                    control: None,
+                    meter: None,
+                    lufs: Some(handle),
                 }
             }
         },

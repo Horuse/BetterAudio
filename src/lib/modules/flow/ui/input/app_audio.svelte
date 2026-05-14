@@ -3,6 +3,7 @@
 	import type { AppAudioNodeData } from '$lib/modules/pipeline/types';
 	import { audioStore } from '$lib/modules/audio/stores.svelte';
 	import Wrapper from '../node.svelte';
+	import InputMeter from './_input_meter.svelte';
 	import { Combobox } from '$lib/modules/form/ui';
 
 	type AppAudioNodeType = Node<AppAudioNodeData, 'appAudio'>;
@@ -65,6 +66,9 @@
 		</div>
 		{#if missing}
 			<span class="text-[10px] text-red-500">App no longer running</span>
+		{/if}
+		{#if data.bundleId && !missing}
+			<InputMeter nodeId={id} />
 		{/if}
 	</div>
 </Wrapper>

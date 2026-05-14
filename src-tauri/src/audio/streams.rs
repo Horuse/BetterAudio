@@ -14,6 +14,7 @@ use cpal::{Sample, SampleFormat, StreamConfig};
 use rtrb::Producer;
 use tracing::error;
 
+use crate::audio::effects::{update_meter, MeterHandle};
 use crate::audio::format::{convert_to_stereo, write_stereo_to_output};
 use crate::error::{AppError, AppResult};
 
@@ -77,17 +78,18 @@ pub fn build_input_stream(
     sample_format: SampleFormat,
     src_channels: usize,
     producers: Vec<Producer<f32>>,
+    meter: Option<MeterHandle>,
     err_cb: impl FnMut(cpal::StreamError) + Send + 'static,
 ) -> AppResult<cpal::Stream> {
     match sample_format {
-        SampleFormat::F32 => build_input_typed::<f32>(device, config, src_channels, producers, err_cb),
-        SampleFormat::I16 => build_input_typed::<i16>(device, config, src_channels, producers, err_cb),
-        SampleFormat::I32 => build_input_typed::<i32>(device, config, src_channels, producers, err_cb),
-        SampleFormat::I8 => build_input_typed::<i8>(device, config, src_channels, producers, err_cb),
-        SampleFormat::U8 => build_input_typed::<u8>(device, config, src_channels, producers, err_cb),
-        SampleFormat::U16 => build_input_typed::<u16>(device, config, src_channels, producers, err_cb),
-        SampleFormat::U32 => build_input_typed::<u32>(device, config, src_channels, producers, err_cb),
-        SampleFormat::F64 => build_input_typed::<f64>(device, config, src_channels, producers, err_cb),
+        SampleFormat::F32 => build_input_typed::<f32>(device, config, src_channels, producers, meter, err_cb),
+        SampleFormat::I16 => build_input_typed::<i16>(device, config, src_channels, producers, meter, err_cb),
+        SampleFormat::I32 => build_input_typed::<i32>(device, config, src_channels, producers, meter, err_cb),
+        SampleFormat::I8 => build_input_typed::<i8>(device, config, src_channels, producers, meter, err_cb),
+        SampleFormat::U8 => build_input_typed::<u8>(device, config, src_channels, producers, meter, err_cb),
+        SampleFormat::U16 => build_input_typed::<u16>(device, config, src_channels, producers, meter, err_cb),
+        SampleFormat::U32 => build_input_typed::<u32>(device, config, src_channels, producers, meter, err_cb),
+        SampleFormat::F64 => build_input_typed::<f64>(device, config, src_channels, producers, meter, err_cb),
         fmt => Err(AppError::Validation(format!(
             "unsupported input sample format: {fmt:?}"
         ))),
@@ -99,6 +101,7 @@ fn build_input_typed<T>(
     config: &StreamConfig,
     src_channels: usize,
     mut producers: Vec<Producer<f32>>,
+    meter: Option<MeterHandle>,
     err_cb: impl FnMut(cpal::StreamError) + Send + 'static,
 ) -> AppResult<cpal::Stream>
 where
@@ -119,6 +122,9 @@ where
                     staging.resize(needed, 0.0);
                 }
                 convert_to_stereo::<T>(data, &mut staging[..needed], src_channels);
+                if let Some(m) = &meter {
+                    update_meter(m, &staging[..needed]);
+                }
                 for prod in &mut producers {
                     bulk_push(prod, &staging[..needed]);
                 }

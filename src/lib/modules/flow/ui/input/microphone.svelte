@@ -6,6 +6,7 @@
 	import type { NativeDeviceInfo } from '$lib/modules/audio/types';
 	import Wrapper from '../node.svelte';
 	import Slider from '../effect/_slider.svelte';
+	import InputMeter from './_input_meter.svelte';
 	import { Combobox } from '$lib/modules/form/ui';
 
 	type MicrophoneNodeType = Node<MicrophoneNodeData, 'microphone'>;
@@ -149,6 +150,7 @@
 					onChange={setGainPct}
 				/>
 			{/if}
+			<InputMeter nodeId={id} />
 		{/if}
 	</div>
 </Wrapper>

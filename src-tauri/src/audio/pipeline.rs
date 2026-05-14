@@ -27,7 +27,7 @@ use tracing::{info, warn};
 use crate::audio::clock::{ClockSource, SystemClockTicker};
 use crate::audio::device::{self, DeviceKind};
 use crate::audio::effects::{
-    instantiate_effect, EffectControl, EffectRegistry, MeterHandle, RuntimeEffect,
+    instantiate_effect, EffectControl, EffectRegistry, LufsHandle, MeterHandle, RuntimeEffect,
 };
 use crate::audio::graph::{
     InputSpec, OutputSpec, ValidGraph, ValidInput, ValidOutput,
@@ -39,6 +39,7 @@ use crate::error::{AppError, AppResult};
 
 const STATE_EVENT: &str = "audio://state";
 const METER_EVENT: &str = "audio://meter";
+const LUFS_EVENT: &str = "audio://lufs";
 const METER_TICK: Duration = Duration::from_millis(33);
 
 /// Ring buffer length (in stereo f32 samples) per bridge. Sized for ~500 ms
@@ -450,6 +451,7 @@ pub fn build(graph: &ValidGraph, app: AppHandle) -> AppResult<ActivePipeline> {
     let mut output_graphs: HashMap<String, OutputGraph> = HashMap::new();
     let mut effect_controls: HashMap<String, EffectControl> = HashMap::new();
     let mut all_meters: Vec<MeterHandle> = Vec::new();
+    let mut all_lufs: Vec<LufsHandle> = Vec::new();
     let mut registry = EffectRegistry::new();
     for out in &graph.outputs {
         let output_sr = output_runtime
@@ -468,6 +470,7 @@ pub fn build(graph: &ValidGraph, app: AppHandle) -> AppResult<ActivePipeline> {
             effect_controls.entry(id).or_insert(control);
         }
         all_meters.extend(built.meters);
+        all_lufs.extend(built.lufs);
         output_graphs.insert(out.id.clone(), built.graph);
     }
 
@@ -487,6 +490,7 @@ pub fn build(graph: &ValidGraph, app: AppHandle) -> AppResult<ActivePipeline> {
             effect_controls.entry(id).or_insert(control);
         }
         all_meters.extend(built.meters);
+        all_lufs.extend(built.lufs);
         monitor_graph = Some(built.graph);
     }
 
@@ -496,7 +500,9 @@ pub fn build(graph: &ValidGraph, app: AppHandle) -> AppResult<ActivePipeline> {
         if producers.is_empty() {
             continue;
         }
-        let stream = start_input_stream(resolved, producers, &app)?;
+        let meter = MeterHandle::new(input_id.clone());
+        all_meters.push(meter.clone());
+        let stream = start_input_stream(resolved, producers, meter, &app)?;
         input_streams.push(stream);
     }
 
@@ -540,10 +546,10 @@ pub fn build(graph: &ValidGraph, app: AppHandle) -> AppResult<ActivePipeline> {
         "pipeline started"
     );
 
-    let meter_thread = if all_meters.is_empty() {
+    let meter_thread = if all_meters.is_empty() && all_lufs.is_empty() {
         None
     } else {
-        Some(spawn_meter_thread(app.clone(), all_meters))
+        Some(spawn_meter_thread(app.clone(), all_meters, all_lufs))
     };
 
     Ok(ActivePipeline {
@@ -559,6 +565,7 @@ struct BuiltOutputGraph {
     graph: OutputGraph,
     controls: Vec<(String, EffectControl)>,
     meters: Vec<MeterHandle>,
+    lufs: Vec<LufsHandle>,
 }
 
 /// Build the per-output DAG: walk backward from `output_id`, topo-sort the
@@ -630,6 +637,7 @@ fn build_output_graph(
     let mut id_to_index: HashMap<String, usize> = HashMap::new();
     let mut controls: Vec<(String, EffectControl)> = Vec::new();
     let mut meters: Vec<MeterHandle> = Vec::new();
+    let mut lufs: Vec<LufsHandle> = Vec::new();
 
     for id in &topo {
         if let Some(_input) = valid.inputs.iter().find(|i| &i.id == id) {
@@ -675,6 +683,9 @@ fn build_output_graph(
             if let Some(m) = build.meter {
                 meters.push(m);
             }
+            if let Some(l) = build.lufs {
+                lufs.push(l);
+            }
             let incoming: Vec<usize> = valid
                 .edges
                 .iter()
@@ -708,6 +719,7 @@ fn build_output_graph(
         },
         controls,
         meters,
+        lufs,
     })
 }
 
@@ -802,6 +814,7 @@ fn resolve_input(inp: &ValidInput) -> AppResult<ResolvedInput> {
 fn start_input_stream(
     resolved: ResolvedInput,
     producers: Vec<Producer<f32>>,
+    meter: MeterHandle,
     app: &AppHandle,
 ) -> AppResult<InputHandle> {
     let app_err = app.clone();
@@ -826,6 +839,7 @@ fn start_input_stream(
                 sample_format,
                 src_channels,
                 producers,
+                Some(meter),
                 err_cb,
             )?;
             Ok(InputHandle::Cpal(stream))
@@ -844,6 +858,7 @@ fn start_input_stream(
                 sample_rate,
                 SCK_CHANNELS as u32,
                 producers,
+                Some(meter),
             )?;
             Ok(InputHandle::Sck(capture))
         }
@@ -858,12 +873,14 @@ fn start_input_stream(
                 sample_rate,
                 SCK_CHANNELS as u32,
                 producers,
+                Some(meter),
             )?;
             Ok(InputHandle::Sck(capture))
         }
         #[cfg(not(target_os = "macos"))]
         ResolvedInput::SystemAudio { .. } | ResolvedInput::AppAudio { .. } => {
             drop(producers);
+            let _ = meter;
             Err(AppError::Stream(
                 "System/App Audio capture is only supported on macOS".into(),
             ))
@@ -1172,7 +1189,11 @@ fn start_speaker_stream(
 
 // ---------- meter tick thread ----------
 
-fn spawn_meter_thread(app: AppHandle, meters: Vec<MeterHandle>) -> MeterTickThread {
+fn spawn_meter_thread(
+    app: AppHandle,
+    meters: Vec<MeterHandle>,
+    lufs: Vec<LufsHandle>,
+) -> MeterTickThread {
     let stop = Arc::new(AtomicBool::new(false));
     let stop_thread = stop.clone();
     let join = thread::Builder::new()
@@ -1190,6 +1211,20 @@ fn spawn_meter_thread(app: AppHandle, meters: Vec<MeterHandle>) -> MeterTickThre
                             "peakR": snap.peak_r,
                             "rmsL": snap.rms_l,
                             "rmsR": snap.rms_r,
+                        }),
+                    );
+                }
+                for l in &lufs {
+                    let snap = l.snapshot();
+                    let _ = app.emit(
+                        LUFS_EVENT,
+                        json!({
+                            "nodeId": l.node_id,
+                            "momentary": snap.momentary,
+                            "shortterm": snap.shortterm,
+                            "integrated": snap.integrated,
+                            "tpL": snap.tp_l,
+                            "tpR": snap.tp_r,
                         }),
                     );
                 }

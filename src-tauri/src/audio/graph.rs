@@ -39,6 +39,7 @@ pub enum NodeKind {
     Limiter,
     Eq,
     LevelMeter,
+    LufsMeter,
 }
 
 impl NodeKind {
@@ -51,7 +52,8 @@ impl NodeKind {
             | NodeKind::ChannelBalance
             | NodeKind::Limiter
             | NodeKind::Eq
-            | NodeKind::LevelMeter => NodeCategory::Effect,
+            | NodeKind::LevelMeter
+            | NodeKind::LufsMeter => NodeCategory::Effect,
         }
     }
 }
@@ -134,6 +136,10 @@ pub struct EqData {
 #[serde(rename_all = "camelCase", default)]
 pub struct LevelMeterData {}
 
+#[derive(Debug, Clone, Copy, Default, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct LufsMeterData {}
+
 #[derive(Debug, Clone)]
 pub enum InputSpec {
     Microphone { device_id: String },
@@ -155,6 +161,7 @@ pub enum EffectSpec {
     Limiter(LimiterData),
     Eq(EqData),
     LevelMeter(LevelMeterData),
+    LufsMeter(LufsMeterData),
 }
 
 #[derive(Debug, Clone)]
@@ -245,15 +252,15 @@ impl GraphSpec {
 
         check_acyclic(&self.nodes, &outgoing)?;
 
-        // Monitor mode: no output but ≥1 analyzer (LevelMeter) acts as terminal.
+        // Monitor mode: no output but ≥1 analyzer (LevelMeter, LufsMeter) acts as terminal.
         let has_outputs = self.nodes.iter().any(|n| n.kind.category() == NodeCategory::Output);
         let has_analyzers = self
             .nodes
             .iter()
-            .any(|n| matches!(n.kind, NodeKind::LevelMeter));
+            .any(|n| matches!(n.kind, NodeKind::LevelMeter | NodeKind::LufsMeter));
         if !has_outputs && !has_analyzers {
             return Err(AppError::Validation(
-                "no routing — connect an input to an output or a Level Meter".into(),
+                "no routing — connect an input to an output or a meter".into(),
             ));
         }
 
@@ -264,7 +271,7 @@ impl GraphSpec {
             })
         } else {
             bfs_backward_pred(&self.nodes, &incoming, |n| {
-                matches!(n.kind, NodeKind::LevelMeter)
+                matches!(n.kind, NodeKind::LevelMeter | NodeKind::LufsMeter)
             })
         };
         let keep: HashSet<&str> = reachable_from_inputs
@@ -437,6 +444,7 @@ fn effect_from_node(n: &NodeSpec) -> AppResult<EffectSpec> {
         NodeKind::Limiter => EffectSpec::Limiter(parse(&n.data, "Limiter")?),
         NodeKind::Eq => EffectSpec::Eq(parse(&n.data, "Eq")?),
         NodeKind::LevelMeter => EffectSpec::LevelMeter(parse(&n.data, "LevelMeter")?),
+        NodeKind::LufsMeter => EffectSpec::LufsMeter(parse(&n.data, "LufsMeter")?),
         _ => unreachable!("non-effect kind passed to effect_from_node"),
     })
 }

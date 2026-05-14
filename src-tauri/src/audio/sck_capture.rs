@@ -17,6 +17,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use rtrb::Producer;
 use tracing::{info, warn};
 
+use crate::audio::effects::{update_meter, MeterHandle};
 use crate::error::{AppError, AppResult};
 
 #[repr(C)]
@@ -102,6 +103,7 @@ struct CallbackState {
     /// `UnsafeCell` (not `Mutex`) — SCK serial queue is the only mutator;
     /// avoids the kernel call `Mutex::lock` can take under priority inversion.
     producers: UnsafeCell<Vec<Producer<f32>>>,
+    meter: Option<MeterHandle>,
     first_call_logged: AtomicBool,
 }
 
@@ -129,6 +131,9 @@ extern "C" fn sample_trampoline(
     }
     let n = (frames as usize) * (channels as usize);
     let slice = unsafe { std::slice::from_raw_parts(samples, n) };
+    if let Some(m) = &state.meter {
+        update_meter(m, slice);
+    }
     // SAFETY: see Sync impl on CallbackState.
     let producers = unsafe { &mut *state.producers.get() };
     for prod in producers.iter_mut() {
@@ -142,6 +147,7 @@ impl SckCapture {
         sample_rate: u32,
         channels: u32,
         producers: Vec<Producer<f32>>,
+        meter: Option<MeterHandle>,
     ) -> AppResult<Self> {
         let handle = unsafe { ba_sck_create() };
         if handle.is_null() {
@@ -151,6 +157,7 @@ impl SckCapture {
         let state = Box::new(CallbackState {
             label: format!("app:{bundle_id}"),
             producers: UnsafeCell::new(producers),
+            meter,
             first_call_logged: AtomicBool::new(false),
         });
         let state_ptr = state.as_ref() as *const CallbackState as *mut c_void;
@@ -188,6 +195,7 @@ impl SckCapture {
         sample_rate: u32,
         channels: u32,
         producers: Vec<Producer<f32>>,
+        meter: Option<MeterHandle>,
     ) -> AppResult<Self> {
         let handle = unsafe { ba_sck_create() };
         if handle.is_null() {
@@ -197,6 +205,7 @@ impl SckCapture {
         let state = Box::new(CallbackState {
             label: "system".to_string(),
             producers: UnsafeCell::new(producers),
+            meter,
             first_call_logged: AtomicBool::new(false),
         });
         let state_ptr = state.as_ref() as *const CallbackState as *mut c_void;

@@ -17,6 +17,7 @@ import ChannelBalance from '../ui/effect/channel_balance.svelte';
 import Limiter from '../ui/effect/limiter.svelte';
 import Eq from '../ui/effect/eq.svelte';
 import LevelMeter from '../ui/effect/level_meter.svelte';
+import LufsMeter from '../ui/effect/lufs_meter.svelte';
 
 // MIME type used during drag-and-drop from the sidebar.
 export const DND_MIME = 'application/x-betteraudio-nodekind';
@@ -122,6 +123,14 @@ export const registry: Record<NodeKind, NodeRegistryEntry> = {
 		description: 'Live L/R peak + RMS meter. Pass-through — drop it anywhere in a chain to watch the signal.',
 		component: LevelMeter,
 		defaultData: {}
+	}),
+	lufsMeter: entry<'lufsMeter'>({
+		kind: 'lufsMeter',
+		category: 'effect',
+		label: 'LUFS Meter',
+		description: 'EBU R128 loudness meter — Momentary / Short-term / Integrated LUFS. Pass-through.',
+		component: LufsMeter,
+		defaultData: { target: -14 }
 	})
 };
 

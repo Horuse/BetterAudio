@@ -6,6 +6,7 @@
 	import { methods as audioMethods } from '$lib/modules/audio/methods';
 	import type { PermissionState } from '$lib/modules/audio/types';
 	import Wrapper from '../node.svelte';
+	import InputMeter from './_input_meter.svelte';
 
 	type SystemAudioNodeType = Node<SystemAudioNodeData, 'systemAudio'>;
 	let { id, data }: NodeProps<SystemAudioNodeType> = $props();
@@ -99,5 +100,6 @@
 			/>
 			Exclude this app (avoid feedback)
 		</label>
+		<InputMeter nodeId={id} />
 	</div>
 </Wrapper>
