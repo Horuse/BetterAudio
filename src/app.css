@@ -45,6 +45,14 @@
 @layer components {
     .button-header {
         @apply bg-neutral-200 hover:bg-neutral-300 hover:text-theme transition-all text-neutral-900 rounded-lg h-6.5 flex justify-center items-center;
+
+        &.active {
+            @apply bg-neutral-500! text-theme!
+        }
+
+        @variant disabled {
+            @apply opacity-50 cursor-not-allowed;
+        }
     }
 
     .button-main {

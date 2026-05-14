@@ -5,11 +5,15 @@ export type EditorActions = {
 	addNode: (kind: NodeKind) => void;
 	getSnapshot: () => Pipeline | null;
 	revertToSnapshot: (p: Pipeline) => void;
+	undo: () => void;
+	redo: () => void;
+	canUndo: () => boolean;
+	canRedo: () => boolean;
 };
 
 class PipelineStore {
 	pipelines = $state<Pipeline[]>([]);
-	editorActions: EditorActions | null = null;
+	editorActions = $state<EditorActions | null>(null);
 	/** Wall-clock millis of the last successful auto-save. `0` before any. */
 	lastSavedAt = $state<number>(0);
 

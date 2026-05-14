@@ -112,8 +112,6 @@
 		edges = toXyEdges(p.edges);
 	}
 
-	pipelineStore.editorActions = { addNode, getSnapshot, revertToSnapshot };
-
 	// Capture on the debounced save tick when enough time has passed --
 	// piggy-backs on real edits, no blind interval.
 	const SNAPSHOT_MIN_SPACING_MS = 30_000;
@@ -123,24 +121,77 @@
 		return JSON.stringify({ nodes: p.nodes, edges: p.edges });
 	}
 
+	// Undo/redo history. Cursor points at the current state inside `history`;
+	// undo decrements, redo increments. New edits truncate forward history.
+	const MAX_HISTORY = 50;
+	let history = $state.raw<Pipeline[]>([untrack(() => getSnapshot())]);
+	let cursor = $state(0);
+	let canUndo = $derived(cursor > 0);
+	let canRedo = $derived(cursor < history.length - 1);
+
+	function captureIfChanged(snap: Pipeline) {
+		const sig = snapshotSignature(snap);
+		const currentSig = snapshotSignature(history[cursor]);
+		if (sig === currentSig) return;
+		const next = history.slice(0, cursor + 1);
+		next.push(snap);
+		const trimmed = next.length > MAX_HISTORY ? next.slice(next.length - MAX_HISTORY) : next;
+		history = trimmed;
+		cursor = trimmed.length - 1;
+	}
+
+	function commit(snap: Pipeline) {
+		pipelineStore.save(snap);
+		const sig = snapshotSignature(snap);
+		const now = Date.now();
+		if (sig !== lastSnapshotSig && now - lastSnapshotAt >= SNAPSHOT_MIN_SPACING_MS) {
+			pipelineMethods.addSnapshot(snap).then(() => {
+				lastSnapshotSig = sig;
+				lastSnapshotAt = now;
+			});
+		}
+		captureIfChanged(snap);
+	}
+
+	function flushPendingCommit() {
+		if (saveTimer === undefined) return;
+		clearTimeout(saveTimer);
+		saveTimer = undefined;
+		untrack(() => commit(getSnapshot()));
+	}
+
+	function undo() {
+		flushPendingCommit();
+		if (cursor === 0) return;
+		cursor -= 1;
+		revertToSnapshot(history[cursor]);
+	}
+
+	function redo() {
+		flushPendingCommit();
+		if (cursor >= history.length - 1) return;
+		cursor += 1;
+		revertToSnapshot(history[cursor]);
+	}
+
+	pipelineStore.editorActions = {
+		addNode,
+		getSnapshot,
+		revertToSnapshot,
+		undo,
+		redo,
+		canUndo: () => canUndo,
+		canRedo: () => canRedo
+	};
+
 	let saveTimer: ReturnType<typeof setTimeout> | undefined;
 	$effect(() => {
 		nodes;
 		edges;
 		clearTimeout(saveTimer);
 		saveTimer = setTimeout(() => {
-			untrack(() => {
-				const snap = getSnapshot();
-				pipelineStore.save(snap);
-				const sig = snapshotSignature(snap);
-				const now = Date.now();
-				if (sig !== lastSnapshotSig && now - lastSnapshotAt >= SNAPSHOT_MIN_SPACING_MS) {
-					pipelineMethods.addSnapshot(snap).then(() => {
-						lastSnapshotSig = sig;
-						lastSnapshotAt = now;
-					});
-				}
-			});
+			saveTimer = undefined;
+			untrack(() => commit(getSnapshot()));
 		}, 500);
 		return () => clearTimeout(saveTimer);
 	});
