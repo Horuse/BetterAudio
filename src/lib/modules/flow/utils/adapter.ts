@@ -16,7 +16,12 @@ export function toXyNodes(nodes: PipelineNode[]): XyNode[] {
 }
 
 export function toXyEdges(edges: PipelineEdge[]): XyEdge[] {
-	return edges.map((e) => ({ id: e.id, source: e.source, target: e.target }));
+	return edges.map((e) => ({
+		id: e.id,
+		source: e.source,
+		target: e.target,
+		targetHandle: e.targetHandle
+	}));
 }
 
 export function fromXyNodes(xyNodes: XyNode[]): PipelineNode[] {
@@ -35,5 +40,10 @@ export function fromXyNodes(xyNodes: XyNode[]): PipelineNode[] {
 }
 
 export function fromXyEdges(xyEdges: XyEdge[]): PipelineEdge[] {
-	return xyEdges.map((e) => ({ id: e.id, source: e.source, target: e.target }));
+	return xyEdges.map((e) => ({
+		id: e.id,
+		source: e.source,
+		target: e.target,
+		targetHandle: e.targetHandle ?? undefined
+	}));
 }

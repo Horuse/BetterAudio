@@ -44,22 +44,6 @@ pub enum RuntimeEffect {
 
 impl RuntimeEffect {
     #[inline]
-    pub fn process(&mut self, samples: &mut [f32], frames: usize) {
-        match self {
-            RuntimeEffect::Gain(e) => e.process(samples, frames),
-            RuntimeEffect::Mute(e) => e.process(samples, frames),
-            RuntimeEffect::ChannelBalance(e) => e.process(samples, frames),
-            RuntimeEffect::Saturator(e) => e.process(samples, frames),
-            RuntimeEffect::Eq(e) => e.process(samples, frames),
-            RuntimeEffect::LevelMeter(e) => e.process(samples, frames),
-            RuntimeEffect::LufsMeter(e) => e.process(samples, frames),
-            RuntimeEffect::Limiter(e) => e.process(samples, frames),
-            RuntimeEffect::Compressor(e) => e.process(samples, frames),
-            RuntimeEffect::NoiseGate(e) => e.process(samples, frames),
-        }
-    }
-
-    #[inline]
     pub fn latency_frames(&self) -> usize {
         match self {
             RuntimeEffect::Gain(e) => e.latency_frames(),
@@ -72,6 +56,27 @@ impl RuntimeEffect {
             RuntimeEffect::Limiter(e) => e.latency_frames(),
             RuntimeEffect::Compressor(e) => e.latency_frames(),
             RuntimeEffect::NoiseGate(e) => e.latency_frames(),
+        }
+    }
+
+    #[inline]
+    pub fn process_with_sidechain(
+        &mut self,
+        main: &mut [f32],
+        sidechain: Option<&[f32]>,
+        frames: usize,
+    ) {
+        match self {
+            RuntimeEffect::Compressor(e) => e.process_with_sidechain(main, sidechain, frames),
+            RuntimeEffect::NoiseGate(e) => e.process_with_sidechain(main, sidechain, frames),
+            RuntimeEffect::Gain(e) => e.process(main, frames),
+            RuntimeEffect::Mute(e) => e.process(main, frames),
+            RuntimeEffect::ChannelBalance(e) => e.process(main, frames),
+            RuntimeEffect::Saturator(e) => e.process(main, frames),
+            RuntimeEffect::Eq(e) => e.process(main, frames),
+            RuntimeEffect::LevelMeter(e) => e.process(main, frames),
+            RuntimeEffect::LufsMeter(e) => e.process(main, frames),
+            RuntimeEffect::Limiter(e) => e.process(main, frames),
         }
     }
 }
@@ -761,8 +766,17 @@ impl CompressorEffect {
     }
 }
 
-impl Effect for CompressorEffect {
-    fn process(&mut self, samples: &mut [f32], frames: usize) {
+impl CompressorEffect {
+    pub fn process_with_sidechain(
+        &mut self,
+        main: &mut [f32],
+        sidechain: Option<&[f32]>,
+        frames: usize,
+    ) {
+        self.process_inner(main, sidechain, frames);
+    }
+
+    fn process_inner(&mut self, main: &mut [f32], sidechain: Option<&[f32]>, frames: usize) {
         let threshold_db = load_f32(&self.threshold_db);
         let ratio = load_f32(&self.ratio).max(1.0);
         let attack_ms = load_f32(&self.attack_ms).max(0.01);
@@ -777,10 +791,13 @@ impl Effect for CompressorEffect {
         let makeup_lin = 10f32.powf(makeup_db / 20.0);
         let half_knee = knee_db * 0.5;
 
-        let stereo = &mut samples[..frames * 2];
-        for frame in stereo.chunks_exact_mut(2) {
-            // Stereo-linked peak detection: louder channel drives both.
-            let detected = frame[0].abs().max(frame[1].abs());
+        let main_buf = &mut main[..frames * 2];
+        let side = sidechain.filter(|s| s.len() >= frames * 2);
+        for (f, frame) in main_buf.chunks_exact_mut(2).enumerate() {
+            let detected = match side {
+                Some(s) => s[f * 2].abs().max(s[f * 2 + 1].abs()),
+                None => frame[0].abs().max(frame[1].abs()),
+            };
             if detected > self.envelope {
                 self.envelope += (detected - self.envelope) * attack_coeff;
             } else {
@@ -806,6 +823,12 @@ impl Effect for CompressorEffect {
             frame[0] *= gain_lin;
             frame[1] *= gain_lin;
         }
+    }
+}
+
+impl Effect for CompressorEffect {
+    fn process(&mut self, samples: &mut [f32], frames: usize) {
+        self.process_inner(samples, None, frames);
     }
 }
 
@@ -860,8 +883,17 @@ impl NoiseGateEffect {
 /// closing without re-opening on every transient.
 const GATE_DETECTOR_RELEASE_MS: f32 = 10.0;
 
-impl Effect for NoiseGateEffect {
-    fn process(&mut self, samples: &mut [f32], frames: usize) {
+impl NoiseGateEffect {
+    pub fn process_with_sidechain(
+        &mut self,
+        main: &mut [f32],
+        sidechain: Option<&[f32]>,
+        frames: usize,
+    ) {
+        self.process_inner(main, sidechain, frames);
+    }
+
+    fn process_inner(&mut self, main: &mut [f32], sidechain: Option<&[f32]>, frames: usize) {
         let threshold_db = load_f32(&self.threshold_db);
         let range_db = load_f32(&self.range_db).min(0.0);
         let attack_ms = load_f32(&self.attack_ms).max(0.01);
@@ -877,9 +909,13 @@ impl Effect for NoiseGateEffect {
         let closed_gain = db_to_linear(range_db);
         let hold_samples = (hold_ms * 0.001 * sr) as u32;
 
-        let stereo = &mut samples[..frames * 2];
-        for frame in stereo.chunks_exact_mut(2) {
-            let detected = frame[0].abs().max(frame[1].abs());
+        let main_buf = &mut main[..frames * 2];
+        let side = sidechain.filter(|s| s.len() >= frames * 2);
+        for (f, frame) in main_buf.chunks_exact_mut(2).enumerate() {
+            let detected = match side {
+                Some(s) => s[f * 2].abs().max(s[f * 2 + 1].abs()),
+                None => frame[0].abs().max(frame[1].abs()),
+            };
             let coeff = if detected > self.envelope { attack_coeff } else { detector_release_coeff };
             self.envelope += (detected - self.envelope) * coeff;
 
@@ -899,6 +935,12 @@ impl Effect for NoiseGateEffect {
             frame[0] *= self.current_gain;
             frame[1] *= self.current_gain;
         }
+    }
+}
+
+impl Effect for NoiseGateEffect {
+    fn process(&mut self, samples: &mut [f32], frames: usize) {
+        self.process_inner(samples, None, frames);
     }
 }
 

@@ -86,7 +86,6 @@ export interface CompressorNodeData extends Record<string, unknown> {
 
 export interface NoiseGateNodeData extends Record<string, unknown> {
 	thresholdDb: number;
-	/** Closed-gate attenuation in dB (negative). */
 	rangeDb: number;
 	attackMs: number;
 	holdMs: number;
@@ -124,6 +123,7 @@ export interface PipelineEdge {
 	id: string;
 	source: string;
 	target: string;
+	targetHandle?: string;
 }
 
 export interface Pipeline {

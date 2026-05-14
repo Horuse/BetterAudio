@@ -17,7 +17,16 @@
 	}
 </script>
 
-<Wrapper label="Noise Gate" accent="effect" hasInput hasOutput>
+<Wrapper
+	label="Noise Gate"
+	accent="effect"
+	hasOutput
+	outputLabel="OUT"
+	inputs={[
+		{ id: 'main', label: 'IN', position: 'left' },
+		{ id: 'sidechain', label: 'Sidechain', position: 'bottom' }
+	]}
+>
 	<div class="flex w-52 flex-col gap-1.5">
 		<Slider
 			label="Threshold"

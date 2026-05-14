@@ -30,7 +30,7 @@ use crate::audio::effects::{
     instantiate_effect, EffectControl, EffectRegistry, LufsHandle, MeterHandle, RuntimeEffect,
 };
 use crate::audio::graph::{
-    InputSpec, OutputSpec, ValidGraph, ValidInput, ValidOutput,
+    EdgeKind, InputSpec, OutputSpec, ValidGraph, ValidInput, ValidOutput,
 };
 use crate::audio::recorder::WavRecorder;
 use crate::audio::resample::StereoResampler;
@@ -326,10 +326,10 @@ impl SourceState {
 
 struct EffectState {
     effect: RuntimeEffect,
-    /// Each entry sums one upstream `out_buf` into this effect's `out_buf`.
-    /// Topo sort guarantees every `src_idx` is < this effect's own index.
     incoming: Vec<IncomingEdge>,
+    sidechain: Vec<IncomingEdge>,
     out_buf: Vec<f32>,
+    sidechain_buf: Option<Vec<f32>>,
 }
 
 /// `delay` is `Some` when this path is shorter than the longest reaching the
@@ -428,7 +428,25 @@ impl OutputGraph {
                         }
                     }
                 }
-                eff.effect.process(&mut eff.out_buf, DSP_BLOCK_FRAMES);
+                if let Some(sc_buf) = eff.sidechain_buf.as_mut() {
+                    for s in sc_buf.iter_mut() {
+                        *s = 0.0;
+                    }
+                    for edge in &mut eff.sidechain {
+                        let src = head[edge.src_idx].out_buf();
+                        match &mut edge.delay {
+                            Some(d) => d.process_and_add(src, sc_buf),
+                            None => {
+                                for (dst, sv) in sc_buf.iter_mut().zip(src.iter()) {
+                                    *dst += *sv;
+                                }
+                            }
+                        }
+                    }
+                }
+                let sc_slice = eff.sidechain_buf.as_deref();
+                eff.effect
+                    .process_with_sidechain(&mut eff.out_buf, sc_slice, DSP_BLOCK_FRAMES);
             }
         }
         for s in output.iter_mut() {
@@ -742,33 +760,46 @@ fn build_output_graph(
             if let Some(l) = build.lufs {
                 lufs.push(l);
             }
-            let upstream: Vec<usize> = valid
-                .edges
+            let mut main_upstream: Vec<usize> = Vec::new();
+            let mut side_upstream: Vec<usize> = Vec::new();
+            for e in &valid.edges {
+                if &e.to == id && reachable.contains(&e.from) {
+                    let idx = id_to_index[&e.from];
+                    match e.kind {
+                        EdgeKind::Main => main_upstream.push(idx),
+                        EdgeKind::Sidechain => side_upstream.push(idx),
+                    }
+                }
+            }
+            let max_upstream = main_upstream
                 .iter()
-                .filter(|e| &e.to == id && reachable.contains(&e.from))
-                .map(|e| id_to_index[&e.from])
-                .collect();
-            let max_upstream = upstream
-                .iter()
+                .chain(side_upstream.iter())
                 .map(|&i| node_latencies[i])
                 .max()
                 .unwrap_or(0);
-            let incoming: Vec<IncomingEdge> = upstream
-                .iter()
-                .map(|&src_idx| {
-                    let pad = max_upstream - node_latencies[src_idx];
-                    IncomingEdge {
-                        src_idx,
-                        delay: if pad > 0 { Some(DelayLine::new(pad)) } else { None },
-                    }
-                })
-                .collect();
+            let make_edge = |src_idx: usize| {
+                let pad = max_upstream - node_latencies[src_idx];
+                IncomingEdge {
+                    src_idx,
+                    delay: if pad > 0 { Some(DelayLine::new(pad)) } else { None },
+                }
+            };
+            let incoming: Vec<IncomingEdge> = main_upstream.iter().copied().map(make_edge).collect();
+            let sidechain: Vec<IncomingEdge> =
+                side_upstream.iter().copied().map(make_edge).collect();
+            let sidechain_buf = if sidechain.is_empty() {
+                None
+            } else {
+                Some(vec![0.0; DSP_BLOCK_FRAMES * 2])
+            };
             let own = build.effect.latency_frames();
             id_to_index.insert(id.clone(), nodes.len());
             nodes.push(DagNode::Effect(EffectState {
                 effect: build.effect,
                 incoming,
+                sidechain,
                 out_buf: vec![0.0; DSP_BLOCK_FRAMES * 2],
+                sidechain_buf,
             }));
             node_latencies.push(max_upstream + own);
         }

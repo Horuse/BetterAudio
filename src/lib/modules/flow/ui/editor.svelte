@@ -129,7 +129,12 @@
 				filePath: (n.data as Record<string, unknown>).filePath ?? null,
 				excludeCurrentApp: (n.data as Record<string, unknown>).excludeCurrentApp ?? null
 			})),
-			edges: edges.map((e) => ({ id: e.id, source: e.source, target: e.target }))
+			edges: edges.map((e) => ({
+				id: e.id,
+				source: e.source,
+				target: e.target,
+				targetHandle: e.targetHandle ?? null
+			}))
 		});
 	}
 

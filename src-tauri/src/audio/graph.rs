@@ -18,11 +18,14 @@ pub struct NodeSpec {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct EdgeSpec {
     #[allow(dead_code)]
     pub id: String,
     pub source: String,
     pub target: String,
+    /// `Some("sidechain")` routes to an effect's sidechain key input.
+    pub target_handle: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq, Hash)]
@@ -169,7 +172,6 @@ pub struct CompressorData {
 #[serde(rename_all = "camelCase")]
 pub struct NoiseGateData {
     pub threshold_db: f32,
-    /// Closed-gate attenuation in dB (negative).
     pub range_db: f32,
     pub attack_ms: f32,
     pub hold_ms: f32,
@@ -221,10 +223,17 @@ pub struct ValidEffect {
     pub spec: EffectSpec,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EdgeKind {
+    Main,
+    Sidechain,
+}
+
 #[derive(Debug, Clone)]
 pub struct ValidEdge {
     pub from: String,
     pub to: String,
+    pub kind: EdgeKind,
 }
 
 /// Validated DAG. Effects may have multiple incoming edges (mixer-bus
@@ -329,6 +338,10 @@ impl GraphSpec {
             .map(|e| ValidEdge {
                 from: e.source.clone(),
                 to: e.target.clone(),
+                kind: match e.target_handle.as_deref() {
+                    Some("sidechain") => EdgeKind::Sidechain,
+                    _ => EdgeKind::Main,
+                },
             })
             .collect();
 
