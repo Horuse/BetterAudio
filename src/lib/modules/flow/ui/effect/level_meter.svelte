@@ -41,6 +41,9 @@
 	const dbLabels = Array.from({ length: 20 }, (_, i) => -i * 3);
 	const minorTicks = Array.from({ length: 60 }, (_, i) => -i);
 
+	const minorTickPos = minorTicks.map((db) => ({ db, pct: dbToPct(db), major: db % 3 === 0 }));
+	const dbLabelPos = dbLabels.map((db) => ({ db, pct: dbToPct(db) }));
+
 	const METER_GRADIENT = `linear-gradient(to top,
         #22c55e 0%, #22c55e 70%,
         #eab308 70%, #eab308 90%,
@@ -107,29 +110,42 @@
 		const tRmsL = ampToDb(targetRmsL);
 		const tRmsR = ampToDb(targetRmsR);
 
-		displayPeakL = tPeakL > displayPeakL
+		const nextPeakL = tPeakL > displayPeakL
 			? tPeakL : Math.max(tPeakL, displayPeakL - PEAK_FALL_DB_PER_SEC * dt);
-		displayPeakR = tPeakR > displayPeakR
-			? tPeakR : Math.max(tPeakR, displayPeakR - PEAK_FALL_DB_PER_SEC * dt);
-		displayRmsL = tRmsL > displayRmsL
-			? tRmsL : Math.max(tRmsL, displayRmsL - PEAK_FALL_DB_PER_SEC * dt);
-		displayRmsR = tRmsR > displayRmsR
-			? tRmsR : Math.max(tRmsR, displayRmsR - PEAK_FALL_DB_PER_SEC * dt);
+		if (nextPeakL !== displayPeakL) displayPeakL = nextPeakL;
 
-		if (tPeakL > holdPeakL) { holdPeakL = tPeakL; holdTimeL = now; }
-		else if (now - holdTimeL > HOLD_TIME_MS) {
-			holdPeakL = Math.max(tPeakL, holdPeakL - HOLD_FALL_DB_PER_SEC * dt);
+		const nextPeakR = tPeakR > displayPeakR
+			? tPeakR : Math.max(tPeakR, displayPeakR - PEAK_FALL_DB_PER_SEC * dt);
+		if (nextPeakR !== displayPeakR) displayPeakR = nextPeakR;
+
+		const nextRmsL = tRmsL > displayRmsL
+			? tRmsL : Math.max(tRmsL, displayRmsL - PEAK_FALL_DB_PER_SEC * dt);
+		if (nextRmsL !== displayRmsL) displayRmsL = nextRmsL;
+
+		const nextRmsR = tRmsR > displayRmsR
+			? tRmsR : Math.max(tRmsR, displayRmsR - PEAK_FALL_DB_PER_SEC * dt);
+		if (nextRmsR !== displayRmsR) displayRmsR = nextRmsR;
+
+		if (tPeakL > holdPeakL) {
+			holdPeakL = tPeakL;
+			holdTimeL = now;
+		} else if (now - holdTimeL > HOLD_TIME_MS) {
+			const next = Math.max(tPeakL, holdPeakL - HOLD_FALL_DB_PER_SEC * dt);
+			if (next !== holdPeakL) holdPeakL = next;
 		}
-		if (tPeakR > holdPeakR) { holdPeakR = tPeakR; holdTimeR = now; }
-		else if (now - holdTimeR > HOLD_TIME_MS) {
-			holdPeakR = Math.max(tPeakR, holdPeakR - HOLD_FALL_DB_PER_SEC * dt);
+		if (tPeakR > holdPeakR) {
+			holdPeakR = tPeakR;
+			holdTimeR = now;
+		} else if (now - holdTimeR > HOLD_TIME_MS) {
+			const next = Math.max(tPeakR, holdPeakR - HOLD_FALL_DB_PER_SEC * dt);
+			if (next !== holdPeakR) holdPeakR = next;
 		}
 
 		if (tPeakL > maxPeakL) maxPeakL = tPeakL;
 		if (tPeakR > maxPeakR) maxPeakR = tPeakR;
 
-		if (targetPeakL >= 1.0) clipL = true;
-		if (targetPeakR >= 1.0) clipR = true;
+		if (targetPeakL >= 1.0 && !clipL) clipL = true;
+		if (targetPeakR >= 1.0 && !clipR) clipR = true;
 
 		rafId = requestAnimationFrame(tick);
 	}
@@ -247,18 +263,18 @@
 				class="relative h-72 w-8 font-mono text-[9px] text-neutral-900 select-none"
 				style="margin-top: 10px;"
 			>
-				{#each minorTicks as db (db)}
+				{#each minorTickPos as t (t.db)}
 					<div
-						class="absolute left-0 h-px bg-neutral-700 {db % 3 === 0 ? 'w-2' : 'w-1'}"
-						style="bottom: {dbToPct(db)}%;"
+						class="absolute left-0 h-px bg-neutral-700 {t.major ? 'w-2' : 'w-1'}"
+						style="bottom: {t.pct}%;"
 					></div>
 				{/each}
-				{#each dbLabels as db (db)}
+				{#each dbLabelPos as l (l.db)}
 					<div
 						class="absolute left-2.5 -translate-y-1/2 leading-none"
-						style="bottom: {dbToPct(db)}%;"
+						style="bottom: {l.pct}%;"
 					>
-						{db}
+						{l.db}
 					</div>
 				{/each}
 				<div class="absolute bottom-0 left-2.5 leading-none">dB</div>

@@ -278,9 +278,14 @@
 		stopped: boolean;
 	}
 
+	function onBeforeUnload() {
+		flushPendingCommit();
+	}
+
 	let unlistenAudioFile: UnlistenFn | undefined;
 	onMount(() => {
 		window.addEventListener('keydown', onWindowKeyDown, { capture: true });
+		window.addEventListener('beforeunload', onBeforeUnload);
 		listen<AudioFileProgress>('audio://audio_file_progress', (e) => {
 			const { nodeId, stopped } = e.payload;
 			if (!audioStore.isRunning) return;
@@ -296,11 +301,14 @@
 		}).then((fn) => {
 			unlistenAudioFile = fn;
 		});
-		return () => window.removeEventListener('keydown', onWindowKeyDown, { capture: true });
+		return () => {
+			window.removeEventListener('keydown', onWindowKeyDown, { capture: true });
+			window.removeEventListener('beforeunload', onBeforeUnload);
+		};
 	});
 
 	onDestroy(() => {
-		clearTimeout(saveTimer);
+		flushPendingCommit();
 		clearTimeout(restartTimer);
 		unlistenAudioFile?.();
 		if (pipelineStore.editorActions?.getSnapshot === getSnapshot) {

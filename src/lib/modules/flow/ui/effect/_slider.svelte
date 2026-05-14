@@ -1,4 +1,6 @@
 <script lang="ts">
+	import { onDestroy } from 'svelte';
+
 	interface Props {
 		label: string;
 		value: number;
@@ -32,6 +34,31 @@
 
 	let ghost = $state<number | null>(null);
 
+	let pendingValue: number | null = null;
+	let pendingRaf: number | undefined;
+
+	function scheduleEmit(v: number) {
+		pendingValue = v;
+		if (pendingRaf !== undefined) return;
+		pendingRaf = requestAnimationFrame(() => {
+			pendingRaf = undefined;
+			const next = pendingValue;
+			pendingValue = null;
+			if (next !== null) onChange(next);
+		});
+	}
+
+	function flushEmit() {
+		if (pendingRaf === undefined) return;
+		cancelAnimationFrame(pendingRaf);
+		pendingRaf = undefined;
+		if (pendingValue !== null) {
+			const next = pendingValue;
+			pendingValue = null;
+			onChange(next);
+		}
+	}
+
 	function display(v: number): string {
 		if (format) return format(v);
 		const fixed = step >= 1 ? 0 : 1;
@@ -50,13 +77,18 @@
 		const next = Number((e.currentTarget as HTMLInputElement).value);
 		if (!Number.isNaN(next)) {
 			ghost = next;
-			onChange(next);
+			scheduleEmit(next);
 		}
 	}
 
 	function clearGhost() {
+		flushEmit();
 		ghost = null;
 	}
+
+	onDestroy(() => {
+		if (pendingRaf !== undefined) cancelAnimationFrame(pendingRaf);
+	});
 
 	function onDoubleClick(e: MouseEvent) {
 		if (defaultValue === undefined) return;
