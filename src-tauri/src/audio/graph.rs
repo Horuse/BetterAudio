@@ -46,6 +46,8 @@ pub enum NodeKind {
     Limiter,
     Compressor,
     NoiseGate,
+    Delay,
+    Reverb,
 }
 
 impl NodeKind {
@@ -62,7 +64,9 @@ impl NodeKind {
             | NodeKind::LufsMeter
             | NodeKind::Limiter
             | NodeKind::Compressor
-            | NodeKind::NoiseGate => NodeCategory::Effect,
+            | NodeKind::NoiseGate
+            | NodeKind::Delay
+            | NodeKind::Reverb => NodeCategory::Effect,
         }
     }
 }
@@ -249,6 +253,23 @@ pub struct NoiseGateData {
     pub release_ms: f32,
 }
 
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DelayData {
+    pub time_ms: f32,
+    pub feedback: f32,
+    pub mix: f32,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReverbData {
+    pub room_size: f32,
+    pub damping: f32,
+    pub width: f32,
+    pub mix: f32,
+}
+
 #[derive(Debug, Clone)]
 pub enum InputSpec {
     Microphone { device_id: String },
@@ -274,6 +295,8 @@ pub enum EffectSpec {
     Limiter(LimiterData),
     Compressor(CompressorData),
     NoiseGate(NoiseGateData),
+    Delay(DelayData),
+    Reverb(ReverbData),
 }
 
 #[derive(Debug, Clone)]
@@ -572,6 +595,8 @@ fn effect_from_node(n: &NodeSpec) -> AppResult<EffectSpec> {
         NodeKind::Limiter => EffectSpec::Limiter(parse(&n.data, "Limiter")?),
         NodeKind::Compressor => EffectSpec::Compressor(parse(&n.data, "Compressor")?),
         NodeKind::NoiseGate => EffectSpec::NoiseGate(parse(&n.data, "NoiseGate")?),
+        NodeKind::Delay => EffectSpec::Delay(parse(&n.data, "Delay")?),
+        NodeKind::Reverb => EffectSpec::Reverb(parse(&n.data, "Reverb")?),
         _ => unreachable!("non-effect kind passed to effect_from_node"),
     })
 }

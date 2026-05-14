@@ -15,7 +15,9 @@ export type NodeKind =
 	| 'lufsMeter'
 	| 'limiter'
 	| 'compressor'
-	| 'noiseGate';
+	| 'noiseGate'
+	| 'delay'
+	| 'reverb';
 
 export interface MicrophoneNodeData extends Record<string, unknown> {
 	deviceId: string | null;
@@ -107,6 +109,19 @@ export interface NoiseGateNodeData extends Record<string, unknown> {
 	releaseMs: number;
 }
 
+export interface DelayNodeData extends Record<string, unknown> {
+	timeMs: number;
+	feedback: number;
+	mix: number;
+}
+
+export interface ReverbNodeData extends Record<string, unknown> {
+	roomSize: number;
+	damping: number;
+	width: number;
+	mix: number;
+}
+
 export type NodeDataMap = {
 	microphone: MicrophoneNodeData;
 	systemAudio: SystemAudioNodeData;
@@ -123,6 +138,8 @@ export type NodeDataMap = {
 	limiter: LimiterNodeData;
 	compressor: CompressorNodeData;
 	noiseGate: NoiseGateNodeData;
+	delay: DelayNodeData;
+	reverb: ReverbNodeData;
 };
 
 export type AnyNodeData = NodeDataMap[NodeKind];

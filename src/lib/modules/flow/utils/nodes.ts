@@ -21,6 +21,8 @@ import LufsMeter from '../ui/effect/lufs_meter.svelte';
 import Limiter from '../ui/effect/limiter.svelte';
 import Compressor from '../ui/effect/compressor.svelte';
 import NoiseGate from '../ui/effect/noise_gate.svelte';
+import Delay from '../ui/effect/delay.svelte';
+import Reverb from '../ui/effect/reverb.svelte';
 
 // MIME type used during drag-and-drop from the sidebar.
 export const DND_MIME = 'application/x-betteraudio-nodekind';
@@ -161,6 +163,22 @@ export const registry: Record<NodeKind, NodeRegistryEntry> = {
 		description: 'Closes when input drops below threshold; hold timer prevents chatter on borderline signals.',
 		component: NoiseGate,
 		defaultData: { thresholdDb: -40, rangeDb: -40, attackMs: 1, holdMs: 50, releaseMs: 200 }
+	}),
+	delay: entry<'delay'>({
+		kind: 'delay',
+		category: 'effect',
+		label: 'Delay',
+		description: 'Stereo delay (1-2000 ms) with feedback and dry/wet mix.',
+		component: Delay,
+		defaultData: { timeMs: 250, feedback: 0.4, mix: 0.35 }
+	}),
+	reverb: entry<'reverb'>({
+		kind: 'reverb',
+		category: 'effect',
+		label: 'Reverb',
+		description: 'Freeverb algorithmic reverb — room size, damping, stereo width, dry/wet mix.',
+		component: Reverb,
+		defaultData: { roomSize: 0.5, damping: 0.5, width: 1, mix: 0.33 }
 	})
 };
 

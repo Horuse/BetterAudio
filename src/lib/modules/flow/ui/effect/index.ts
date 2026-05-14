@@ -7,3 +7,5 @@ export { default as LufsMeter } from './lufs_meter.svelte';
 export { default as Limiter } from './limiter.svelte';
 export { default as Compressor } from './compressor.svelte';
 export { default as NoiseGate } from './noise_gate.svelte';
+export { default as Delay } from './delay.svelte';
+export { default as Reverb } from './reverb.svelte';
