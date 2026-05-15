@@ -7,7 +7,7 @@
 use std::sync::mpsc::{Receiver, Sender};
 
 use tauri::AppHandle;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
 use crate::audio::graph::ValidGraph;
 use crate::audio::pipeline::{self, ActivePipeline};
@@ -61,11 +61,13 @@ pub fn run(rx: Receiver<Command>) {
         match cmd {
             Command::Start { graph, app, reply } => {
                 if active.is_some() {
+                    warn!("start ignored: pipeline already running");
                     let _ = reply.send(Err(AppError::AlreadyRunning));
                     continue;
                 }
                 match pipeline::build(&graph, app) {
                     Ok(p) => {
+                        info!("pipeline built and running");
                         active = Some(p);
                         let _ = reply.send(Ok(()));
                     }
@@ -77,8 +79,10 @@ pub fn run(rx: Receiver<Command>) {
             }
             Command::Stop { reply } => {
                 if active.take().is_none() {
+                    warn!("stop ignored: pipeline not running");
                     let _ = reply.send(Err(AppError::NotRunning));
                 } else {
+                    info!("pipeline torn down");
                     let _ = reply.send(Ok(()));
                 }
             }

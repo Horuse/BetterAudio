@@ -1,4 +1,4 @@
-import { arch, hostname, platform, version } from '@tauri-apps/plugin-os';
+import { arch, platform, version } from '@tauri-apps/plugin-os';
 import { getVersion, getTauriVersion } from '@tauri-apps/api/app';
 
 export interface AppInfo {
@@ -7,29 +7,20 @@ export interface AppInfo {
 	platform: string;
 	osVersion: string;
 	arch: string;
-	hostname: string | null;
 }
 
 let cached: AppInfo | null = null;
 
 export async function loadAppInfo(): Promise<AppInfo> {
 	if (cached) return cached;
-	const [appVersion, tauriVersion, plat, ver, ar, host] = await Promise.all([
+	const [appVersion, tauriVersion, plat, ver, ar] = await Promise.all([
 		getVersion(),
 		getTauriVersion(),
 		platform(),
 		version(),
-		arch(),
-		hostname()
+		arch()
 	]);
-	cached = {
-		appVersion,
-		tauriVersion,
-		platform: plat,
-		osVersion: ver,
-		arch: ar,
-		hostname: host
-	};
+	cached = { appVersion, tauriVersion, platform: plat, osVersion: ver, arch: ar };
 	return cached;
 }
 

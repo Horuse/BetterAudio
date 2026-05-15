@@ -37,12 +37,15 @@
 		}
 	}
 
-	onMount(async () => {
-		await installErrorHandlers();
+	onMount(() => {
+		installErrorHandlers().catch(() => {});
 		loadAppInfo().catch(() => {});
-		await Promise.all([audioStore.init(), pipelineStore.refresh()]);
+		audioStore.init().catch(() => {});
+		pipelineStore.refresh().catch(() => {});
 		checkForUpdates().catch(() => {});
-		unlistenMenu = await listen<string>('menu://action', (e) => handleMenu(e.payload));
+		listen<string>('menu://action', (e) => handleMenu(e.payload))
+			.then((fn) => { unlistenMenu = fn; })
+			.catch(() => {});
 	});
 
 	onDestroy(() => {

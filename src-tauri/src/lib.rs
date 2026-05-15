@@ -6,6 +6,7 @@ mod state;
 use std::sync::OnceLock;
 
 use serde_json::json;
+use tracing::info;
 use state::AppState;
 use tauri::menu::{MenuBuilder, MenuItemBuilder, SubmenuBuilder};
 use tauri::{AppHandle, Emitter};
@@ -84,6 +85,7 @@ pub fn run() {
 
     tauri::Builder::default()
         .setup(|app| {
+            info!("app started");
             let handle = app.handle().clone();
             let _ = APP_HANDLE.set(handle.clone());
 
@@ -106,6 +108,7 @@ pub fn run() {
             commands::list_input_devices,
             commands::list_output_devices,
             commands::list_audio_applications,
+            commands::get_app_icons,
             commands::device_info,
             commands::check_screen_recording_permission,
             commands::start_pipeline,

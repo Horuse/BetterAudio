@@ -57,11 +57,10 @@ embed_plist = "1.2"
 objc2 = "0.6"
 objc2-foundation = { version = "0.3", features = [
     "NSArray", "NSString", "NSEnumerator", "NSError", "NSObject",
-    "NSObjCRuntime", "NSDictionary", "NSValue", "NSData"
+    "NSObjCRuntime", "NSDictionary", "NSValue", "NSData", "NSURL"
 ] }
 objc2-app-kit = { version = "0.3", features = [
-    "NSWorkspace", "NSRunningApplication",
-    "NSImage", "NSImageRep", "NSBitmapImageRep", "NSGraphics"
+    "NSWorkspace", "NSRunningApplication"
 ] }
 # SCK integration uses a hand-rolled Swift static library at `native/`,
 # compiled by build.rs (direct `swiftc`, no SwiftPM). The screencapturekit

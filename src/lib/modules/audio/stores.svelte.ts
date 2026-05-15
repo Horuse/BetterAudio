@@ -24,14 +24,20 @@ class AudioStore {
 	}
 
 	async refreshAudioApplications(): Promise<void> {
-		// Can fail without ScreenCaptureKit access; treat as empty.
-		this.audioApplications = await methods
-			.listAudioApplications()
-			.catch(() => [] as AudioApplication[]);
+		const apps = await methods.listAudioApplications().catch(() => [] as AudioApplication[]);
+		this.audioApplications = apps;
+		if (apps.length === 0) return;
+		methods
+			.getAppIcons(apps.map((a) => a.bundleId))
+			.then((icons) => {
+				this.audioApplications = this.audioApplications.map((a) =>
+					icons[a.bundleId] ? { ...a, icon: icons[a.bundleId] } : a
+				);
+			})
+			.catch(() => {});
 	}
 
 	async init(): Promise<void> {
-		// App icon generation is slow on first call; fill in the background.
 		await Promise.all([this.refreshInputDevices(), this.refreshOutputDevices()]);
 		void this.refreshAudioApplications();
 		this.unlisten = await methods.onState((e) => {

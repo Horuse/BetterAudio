@@ -2,6 +2,7 @@ use std::sync::mpsc;
 
 use serde_json::json;
 use tauri::{AppHandle, Emitter, State};
+use tracing::info;
 
 use crate::audio::device::{self, DeviceInfo, DeviceKind, NativeDeviceInfo};
 use crate::audio::engine::Command;
@@ -15,17 +16,31 @@ const STATE_EVENT: &str = "audio://state";
 
 #[tauri::command]
 pub fn list_input_devices() -> AppResult<Vec<DeviceInfo>> {
-    device::list_inputs()
+    let devices = device::list_inputs()?;
+    info!(count = devices.len(), "input devices listed");
+    Ok(devices)
 }
 
 #[tauri::command]
 pub fn list_output_devices() -> AppResult<Vec<DeviceInfo>> {
-    device::list_outputs()
+    let devices = device::list_outputs()?;
+    info!(count = devices.len(), "output devices listed");
+    Ok(devices)
 }
 
 #[tauri::command]
 pub fn list_audio_applications() -> AppResult<Vec<AudioApplication>> {
-    system_audio::list_audio_applications()
+    let apps = system_audio::list_audio_applications()?;
+    info!(count = apps.len(), "audio applications listed");
+    Ok(apps)
+}
+
+#[tauri::command]
+pub fn get_app_icons(bundle_ids: Vec<String>) -> std::collections::HashMap<String, String> {
+    info!(count = bundle_ids.len(), "loading app icons");
+    let icons = system_audio::load_app_icons(bundle_ids);
+    info!(loaded = icons.len(), "app icons loaded");
+    icons
 }
 
 #[tauri::command]
@@ -35,7 +50,9 @@ pub fn device_info(kind: DeviceKind, name: String) -> AppResult<NativeDeviceInfo
 
 #[tauri::command]
 pub fn check_screen_recording_permission() -> PermissionState {
-    permission::screen_recording()
+    let state = permission::screen_recording();
+    info!(?state, "screen recording permission checked");
+    state
 }
 
 #[tauri::command]
@@ -44,6 +61,7 @@ pub fn start_pipeline(
     state: State<'_, AppState>,
     app: AppHandle,
 ) -> AppResult<()> {
+    info!(nodes = graph.nodes.len(), "starting pipeline");
     let valid = graph.validate()?;
     let (reply_tx, reply_rx) = mpsc::channel();
     state
@@ -58,6 +76,7 @@ pub fn start_pipeline(
         .recv()
         .map_err(|_| AppError::Stream("audio thread reply lost".into()))?;
     if result.is_ok() {
+        info!("pipeline started");
         let _ = app.emit(STATE_EVENT, json!({ "kind": "started" }));
     }
     result
@@ -121,6 +140,7 @@ pub fn reconcile_pipeline(
     state: State<'_, AppState>,
     app: AppHandle,
 ) -> AppResult<()> {
+    info!(nodes = graph.nodes.len(), "reconciling pipeline");
     let valid = graph.validate()?;
     let (reply_tx, reply_rx) = mpsc::channel();
     state
@@ -178,6 +198,7 @@ pub fn set_audio_file_loop(
 
 #[tauri::command]
 pub fn stop_pipeline(state: State<'_, AppState>, app: AppHandle) -> AppResult<()> {
+    info!("stopping pipeline");
     let (reply_tx, reply_rx) = mpsc::channel();
     state
         .audio_tx
@@ -187,6 +208,7 @@ pub fn stop_pipeline(state: State<'_, AppState>, app: AppHandle) -> AppResult<()
         .recv()
         .map_err(|_| AppError::Stream("audio thread reply lost".into()))?;
     if result.is_ok() {
+        info!("pipeline stopped");
         let _ = app.emit(STATE_EVENT, json!({ "kind": "stopped" }));
     }
     result

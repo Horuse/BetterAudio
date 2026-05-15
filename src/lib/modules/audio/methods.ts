@@ -16,6 +16,8 @@ export const methods = {
 	listOutputDevices: (): Promise<AudioDevice[]> => invoke<AudioDevice[]>('list_output_devices'),
 	listAudioApplications: (): Promise<AudioApplication[]> =>
 		invoke<AudioApplication[]>('list_audio_applications'),
+	getAppIcons: (bundleIds: string[]): Promise<Record<string, string>> =>
+		invoke<Record<string, string>>('get_app_icons', { bundleIds }),
 	deviceInfo: (kind: 'input' | 'output', name: string): Promise<NativeDeviceInfo> =>
 		invoke<NativeDeviceInfo>('device_info', { kind, name }),
 	checkScreenRecordingPermission: (): Promise<PermissionState> =>
