@@ -9,6 +9,14 @@
 		"opener:default",
 		"store:default",
 		"dialog:default",
-		"dialog:allow-save"
+		"dialog:allow-save",
+		"updater:default",
+		"process:default",
+		"process:allow-restart",
+		"os:default",
+		"os:allow-platform",
+		"os:allow-version",
+		"os:allow-arch",
+		"os:allow-hostname"
 	]
 }

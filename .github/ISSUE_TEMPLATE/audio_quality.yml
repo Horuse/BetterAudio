@@ -1,0 +1,44 @@
+name: Audio quality issue
+description: Glitches, clicks, distortion, sync drift, latency, dropouts.
+title: '[audio] '
+labels: ['audio']
+body:
+  - type: textarea
+    id: symptom
+    attributes:
+      label: What's wrong with the audio?
+      placeholder: e.g. periodic clicks every ~1 second on output, only when EQ is active.
+    validations:
+      required: true
+  - type: textarea
+    id: pipeline
+    attributes:
+      label: Pipeline setup
+      description: List the nodes and how they connect, e.g. Microphone → Compressor → Speaker.
+    validations:
+      required: true
+  - type: input
+    id: input-device
+    attributes:
+      label: Input device
+      placeholder: e.g. MacBook Pro Microphone, 48kHz
+  - type: input
+    id: output-device
+    attributes:
+      label: Output device
+      placeholder: e.g. AirPods Pro, Bluetooth
+  - type: dropdown
+    id: reproducible
+    attributes:
+      label: Reproducible?
+      options:
+        - Always
+        - Sometimes
+        - Once
+    validations:
+      required: true
+  - type: textarea
+    id: additional
+    attributes:
+      label: Additional context
+      description: Sample audio, screenshots of the graph, console output.

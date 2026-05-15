@@ -1,0 +1,33 @@
+name: Crash report
+description: The app crashed or showed an error modal. Auto-pre-filled when reporting from inside the app.
+title: '[crash] '
+labels: ['crash', 'bug']
+body:
+  - type: markdown
+    attributes:
+      value: |
+        If you got here from the in-app **Report on GitHub** button, the body is
+        already pre-filled with diagnostic info. Just add what you were doing
+        and submit.
+  - type: textarea
+    id: body
+    attributes:
+      label: Crash details
+      description: Diagnostic info, stack trace, repro steps. Pre-filled by the app.
+      value: |
+        ## Diagnostic info
+        <!-- App version, OS, source, time, message, stack will be inserted here -->
+
+        ## Steps to reproduce
+        <!-- What were you doing when this happened? Be specific. -->
+        1.
+        2.
+        3.
+
+        ## Expected behavior
+        <!-- What did you expect to happen? -->
+
+        ## Additional context
+        <!-- Screenshots, logs, related issues. -->
+    validations:
+      required: true

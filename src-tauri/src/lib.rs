@@ -3,10 +3,37 @@ mod commands;
 mod error;
 mod state;
 
+use std::sync::OnceLock;
+
+use serde_json::json;
 use state::AppState;
+use tauri::{AppHandle, Emitter};
+
+const PANIC_EVENT: &str = "error://panic";
+
+static APP_HANDLE: OnceLock<AppHandle> = OnceLock::new();
+
+fn install_panic_hook() {
+    let default = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        default(info);
+        let backtrace = std::backtrace::Backtrace::force_capture().to_string();
+        let payload = json!({
+            "message": info.to_string(),
+            "backtrace": backtrace,
+            "thread": std::thread::current().name().unwrap_or("<unnamed>"),
+            "version": env!("CARGO_PKG_VERSION"),
+        });
+        if let Some(h) = APP_HANDLE.get() {
+            let _ = h.emit(PANIC_EVENT, payload);
+        }
+    }));
+}
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    install_panic_hook();
+
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -16,9 +43,16 @@ pub fn run() {
         .ok();
 
     tauri::Builder::default()
+        .setup(|app| {
+            let _ = APP_HANDLE.set(app.handle().clone());
+            Ok(())
+        })
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_store::Builder::default().build())
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_process::init())
+        .plugin(tauri_plugin_os::init())
         .manage(AppState::spawn())
         .invoke_handler(tauri::generate_handler![
             commands::list_input_devices,

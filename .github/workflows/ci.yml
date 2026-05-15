@@ -28,11 +28,15 @@ jobs:
       - name: Install JS deps
         run: bun install --frozen-lockfile
 
+      # Cargo picks up src-tauri/.cargo/config.toml (CMAKE_POLICY_VERSION_MINIMUM,
+      # TS_RS_EXPORT_DIR) only when invoked from inside that directory.
       - name: Cargo check
-        run: cargo check --manifest-path src-tauri/Cargo.toml --all-targets
+        working-directory: src-tauri
+        run: cargo check --all-targets
 
       - name: Cargo tests (also regenerates ts-rs bindings)
-        run: cargo test --manifest-path src-tauri/Cargo.toml
+        working-directory: src-tauri
+        run: cargo test
 
       - name: TS-RS bindings up to date
         run: git diff --exit-code -- src/lib/modules/pipeline/generated
