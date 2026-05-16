@@ -14,7 +14,7 @@
 	let applying = $state(false);
 	let installing = $state(false);
 	let error = $state<string | null>(null);
-	let applied = $state(false);
+	let dirty = $state(false);
 
 	$effect(() => {
 		loadAll();
@@ -27,32 +27,32 @@
 		]);
 		status = s;
 		devices = saved ?? [];
+		dirty = false;
 	}
 
 	function addDevice() {
 		devices = [...devices, { id: createId(), name: `Device ${devices.length + 1}` }];
-		applied = false;
+		dirty = true;
 	}
 
 	function removeDevice(id: string) {
 		devices = devices.filter((d) => d.id !== id);
-		applied = false;
+		dirty = true;
 	}
 
 	function rename(id: string, name: string) {
 		devices = devices.map((d) => (d.id === id ? { ...d, name } : d));
-		applied = false;
+		dirty = true;
 	}
 
 	async function apply() {
 		error = null;
-		applied = false;
 		applying = true;
 		try {
 			await store.set(STORE_KEY, devices);
 			await store.save();
 			await methods.applyVirtualDevices(devices);
-			applied = true;
+			dirty = false;
 		} catch (e) {
 			error = String(e);
 		} finally {
@@ -94,8 +94,15 @@
 </Header>
 
 <div class="flex flex-col gap-8 p-8">
-	<div class="h-10.5 flex items-center">
-		<h1 class="text-2xl font-semibold ">Virtual Devices</h1>
+	<div class="flex mt-2 gap-1 flex-col">
+		<h1 class="text-2xl font-semibold">Virtual Devices</h1>
+
+		<p class="max-w-2xl text-sm text-neutral-700">
+			A virtual device is a system audio device that exists only in software — no hardware required.
+			Apps can send audio to it or record from it just like a real microphone or speaker. Each device
+			appears as both an input and an output, so a pipeline can receive audio from one app and route
+			it to another.
+		</p>
 	</div>
 
 	<div class="flex items-center gap-4 rounded-2xl bg-neutral-200 px-4 py-4">
@@ -133,7 +140,7 @@
 					{#each devices as d (d.id)}
 						<li class="flex items-center gap-3 rounded-2xl bg-neutral-200 px-4 py-3">
 							<input
-								class="flex-1 bg-transparent font-medium outline-none"
+								class="input-base flex-1 font-medium"
 								value={d.name}
 								oninput={(e) => rename(d.id, (e.currentTarget as HTMLInputElement).value)}
 							/>
@@ -153,6 +160,13 @@
 			{/if}
 		</div>
 
+		{#if dirty}
+			<div class="warning-block">
+				<strong>Changes not applied</strong>
+				Press Apply to update the system audio devices. macOS will briefly interrupt audio playback.
+			</div>
+		{/if}
+
 		{#if error}
 			<p class="text-sm text-red-500">{error}</p>
 		{/if}
@@ -161,11 +175,6 @@
 			<button class="button-main primary px-8 py-2" onclick={apply} disabled={applying}>
 				{applying ? 'Applying...' : 'Apply'}
 			</button>
-			{#if applied}
-				<span class="text-sm text-green-600">Applied</span>
-			{:else}
-				<span class="text-xs text-neutral-900">Audio will briefly interrupt when applied.</span>
-			{/if}
 		</div>
 	{/if}
 </div>

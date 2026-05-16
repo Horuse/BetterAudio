@@ -11,6 +11,8 @@ class AudioStore {
 	outputDevices = $state<AudioDevice[]>([]);
 	audioApplications = $state<AudioApplication[]>([]);
 	isRunning = $state(false);
+	runningPipelineId = $state<string | null>(null);
+	startedAt = $state<number | null>(null);
 	lastError = $state<string | null>(null);
 
 	private unlisten: UnlistenFn | undefined;
@@ -40,17 +42,29 @@ class AudioStore {
 	async init(): Promise<void> {
 		await Promise.all([this.refreshInputDevices(), this.refreshOutputDevices()]);
 		void this.refreshAudioApplications();
+		this.isRunning = await methods.isPipelineRunning().catch(() => false);
+		if (this.isRunning) this.startedAt = Date.now();
 		this.unlisten = await methods.onState((e) => {
 			if (e.kind === 'started') {
 				this.isRunning = true;
+				this.startedAt = Date.now();
 				this.lastError = null;
 			} else if (e.kind === 'stopped') {
 				this.isRunning = false;
+				this.runningPipelineId = null;
+				this.startedAt = null;
 			} else if (e.kind === 'error') {
 				this.isRunning = false;
+				this.runningPipelineId = null;
+				this.startedAt = null;
 				this.lastError = e.message;
 			}
 		});
+	}
+
+	async activatePipeline(pipelineId: string, graph: StartPipelinePayload): Promise<void> {
+		await methods.startPipeline(graph);
+		this.runningPipelineId = pipelineId;
 	}
 
 	/** Apply a new graph to the running pipeline. Uses `reconcile_pipeline`,

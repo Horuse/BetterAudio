@@ -533,6 +533,7 @@
 		ondrop={onDrop}
 	>
 		<SvelteFlow
+			proOptions={{ hideAttribution: true }}
 			class="!bg-background"
 			bind:nodes
 			bind:edges

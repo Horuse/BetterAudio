@@ -3,6 +3,8 @@
 	import { audioStore } from '../stores.svelte';
 	import { pipelineStore } from '$lib/modules/pipeline/stores.svelte';
 
+	let { pipelineId }: { pipelineId: string } = $props();
+
 	let busy = $state(false);
 
 	async function toggle() {
@@ -18,7 +20,7 @@
 					audioStore.lastError = 'No pipeline loaded';
 					return;
 				}
-				await methods.startPipeline({ nodes: snapshot.nodes, edges: snapshot.edges });
+				await audioStore.activatePipeline(pipelineId, { nodes: snapshot.nodes, edges: snapshot.edges });
 			}
 		} catch (e) {
 			audioStore.lastError = e instanceof Error ? e.message : String(e);
@@ -30,9 +32,9 @@
 
 <button
 	class={[
-		'button-header px-4',
-		!audioStore.isRunning && 'bg-green-600 text-green-200 hover:bg-green-700',
-		audioStore.isRunning && 'bg-red-600 text-red-200 hover:bg-red-700'
+		'button-main primary px-4 py-0 rounded-lg',
+		!audioStore.isRunning && 'green',
+		audioStore.isRunning && 'red'
 	]}
 	disabled={busy}
 	onclick={toggle}

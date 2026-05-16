@@ -27,6 +27,32 @@
 
     import Header from '$lib/components/layout/header.svelte';
     import { page } from '$app/state';
+    import { audioStore } from '$lib/modules/audio/stores.svelte';
+    import { methods as audioMethods } from '$lib/modules/audio/methods';
+    import { RunningTimer } from '$lib/modules/audio/ui';
+
+    let busy = $state<string | null>(null);
+
+    async function toggle(id: string, event: Event) {
+        event.stopPropagation();
+        event.preventDefault();
+        if (busy) return;
+        busy = id;
+        audioStore.lastError = null;
+        try {
+            if (audioStore.isRunning) {
+                await audioMethods.stopPipeline();
+            } else {
+                const p = await pipelineMethods.get(id);
+                if (!p) return;
+                await audioStore.activatePipeline(id, { nodes: p.nodes, edges: p.edges });
+            }
+        } catch (e) {
+            audioStore.lastError = e instanceof Error ? e.message : String(e);
+        } finally {
+            busy = null;
+        }
+    }
 </script>
 
 <Header>
@@ -57,18 +83,45 @@
             {#each pipelineStore.pipelines as p (p.id)}
                 <li class="flex items-center bg-neutral-200 hover:bg-neutral-300 transition-colors rounded-2xl">
                     <a href={`/pipelines/${p.id}`} class="flex-1 p-4">
-                        <div class="font-medium">{p.name}</div>
+                        <div class="flex items-center gap-2">
+                            {#if audioStore.runningPipelineId === p.id}
+                                <span class="size-2 rounded-full bg-green-500"></span>
+                            {/if}
+                            <span class="font-medium">{p.name}</span>
+                            {#if audioStore.runningPipelineId === p.id}
+                                <RunningTimer />
+                            {/if}
+                        </div>
                         <div class="text-xs text-neutral-900">
                             {p.nodes.length} nodes · updated {relativeTime(p.updatedAt)}
                         </div>
                     </a>
-                    <button
-                            class="button-main red py-1.5 mx-4"
-                            onclick={(e) => remove(p.id, p.name, e)}
-                            aria-label="Delete pipeline"
-                    >
-                        Delete
-                    </button>
+                    <div class="flex items-center gap-2 mx-4">
+                        <button
+                            class={[
+                                'button-main primary px-4',
+                                !audioStore.isRunning && 'green',
+                                audioStore.isRunning && audioStore.runningPipelineId === p.id && 'red'
+                            ]}
+                            disabled={!!busy || (audioStore.isRunning && audioStore.runningPipelineId !== p.id)}
+                            onclick={(e) => toggle(p.id, e)}
+                        >
+                            {#if busy === p.id}
+                                …
+                            {:else if audioStore.isRunning && audioStore.runningPipelineId === p.id}
+                                Stop
+                            {:else}
+                                Activate
+                            {/if}
+                        </button>
+                        <button
+                                class="button-main red py-1.5"
+                                onclick={(e) => remove(p.id, p.name, e)}
+                                aria-label="Delete pipeline"
+                        >
+                            Delete
+                        </button>
+                    </div>
                 </li>
             {/each}
         </ul>

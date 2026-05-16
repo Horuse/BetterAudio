@@ -24,6 +24,7 @@ export const methods = {
 		invoke<NativeDeviceInfo>('device_info', { kind, name }),
 	checkScreenRecordingPermission: (): Promise<PermissionState> =>
 		invoke<PermissionState>('check_screen_recording_permission'),
+	isPipelineRunning: (): Promise<boolean> => invoke<boolean>('is_pipeline_running'),
 	startPipeline: (graph: StartPipelinePayload): Promise<void> =>
 		invoke('start_pipeline', { graph }),
 	stopPipeline: (): Promise<void> => invoke('stop_pipeline'),

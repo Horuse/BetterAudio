@@ -115,6 +115,7 @@ pub fn run() {
             commands::apply_virtual_devices,
             commands::device_info,
             commands::check_screen_recording_permission,
+            commands::is_pipeline_running,
             commands::start_pipeline,
             commands::stop_pipeline,
             commands::reconcile_pipeline,

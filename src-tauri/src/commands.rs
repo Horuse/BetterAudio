@@ -198,6 +198,18 @@ pub fn set_audio_file_loop(
 }
 
 #[tauri::command]
+pub fn is_pipeline_running(state: State<'_, AppState>) -> AppResult<bool> {
+    let (reply_tx, reply_rx) = mpsc::channel();
+    state
+        .audio_tx
+        .send(Command::IsRunning { reply: reply_tx })
+        .map_err(|_| AppError::Stream("audio thread is gone".into()))?;
+    reply_rx
+        .recv()
+        .map_err(|_| AppError::Stream("audio thread reply lost".into()))
+}
+
+#[tauri::command]
 pub fn virtual_driver_status() -> VirtualDriverStatus {
     virtual_device::status()
 }

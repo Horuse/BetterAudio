@@ -4,7 +4,7 @@
 	import { methods as pipelineMethods } from '$lib/modules/pipeline/methods';
 	import { pipelineStore } from '$lib/modules/pipeline/stores.svelte';
 	import { audioStore } from '$lib/modules/audio/stores.svelte';
-	import { ActivationButton } from '$lib/modules/audio/ui';
+	import { ActivationButton, RunningTimer } from '$lib/modules/audio/ui';
 	import Header from '$lib/components/layout/header.svelte';
 	import Flow from '$lib/modules/flow';
 	import { SnapshotHistory, SavedIndicator, UndoRedo } from '$lib/modules/flow/ui';
@@ -60,11 +60,14 @@
 			{#if audioStore.lastError}
 				<span class="text-xs text-red-600">{audioStore.lastError}</span>
 			{/if}
+			{#if audioStore.isRunning}
+				<RunningTimer />
+			{/if}
 			{#if pipeline}
 				<UndoRedo />
 				<SavedIndicator />
 				<SnapshotHistory pipelineId={pipeline.id} />
-				<ActivationButton />
+				<ActivationButton pipelineId={pipeline.id} />
 			{/if}
 		</div>
 	{/snippet}

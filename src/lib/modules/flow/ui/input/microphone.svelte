@@ -112,7 +112,7 @@
 </script>
 
 <Wrapper label="Microphone" accent="input" hasOutput>
-	<div class="flex w-50 flex-col gap-1">
+	<div class="flex w-50 flex-col gap-2">
 		<div class="flex items-center gap-1">
 			<Combobox {options} value={data.deviceId ?? null} placeholder="— Select microphone —" onChange={setDevice} />
 			<button

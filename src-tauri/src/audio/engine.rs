@@ -51,6 +51,9 @@ pub enum Command {
         enabled: bool,
         reply: Sender<AppResult<()>>,
     },
+    IsRunning {
+        reply: Sender<bool>,
+    },
 }
 
 pub fn run(rx: Receiver<Command>) {
@@ -129,6 +132,9 @@ pub fn run(rx: Receiver<Command>) {
                     p.set_audio_file_loop(&node_id, enabled);
                 }
                 let _ = reply.send(Ok(()));
+            }
+            Command::IsRunning { reply } => {
+                let _ = reply.send(active.is_some());
             }
         }
     }
