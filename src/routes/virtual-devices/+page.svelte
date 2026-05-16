@@ -93,7 +93,7 @@
 	{/snippet}
 </Header>
 
-<div class="flex flex-col gap-8 p-8">
+<div class="flex flex-col gap-8 p-8 h-[calc(100vh-40px)] overflow-y-auto">
 	<div class="flex mt-2 gap-1 flex-col">
 		<h1 class="text-2xl font-semibold">Virtual Devices</h1>
 
