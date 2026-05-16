@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use crate::audio::graph::NoiseGateData;
 
-use super::util::{db_to_linear, load_f32};
+use super::util::{db_to_linear, load_f32, store_f32};
 use super::{Effect, EffectControl};
 
 /// Noise gate: closes (attenuates by `range_db`) when input falls below
@@ -20,6 +20,8 @@ pub struct NoiseGateEffect {
     /// Frames remaining in the "open during hold" state; reset whenever the
     /// envelope crosses above threshold.
     hold_remaining: u32,
+    /// Current gate gain (0-1 linear) written each block. 1.0 = fully open.
+    pub state_gain: Arc<AtomicU32>,
 }
 
 /// Envelope-detector release time constant; short enough for fast gate
@@ -27,12 +29,13 @@ pub struct NoiseGateEffect {
 const GATE_DETECTOR_RELEASE_MS: f32 = 10.0;
 
 impl NoiseGateEffect {
-    pub fn new(d: NoiseGateData, sample_rate: u32) -> (Self, EffectControl) {
+    pub fn new(d: NoiseGateData, sample_rate: u32) -> (Self, EffectControl, Arc<AtomicU32>) {
         let threshold_db = Arc::new(AtomicU32::new(d.threshold_db.to_bits()));
         let range_db = Arc::new(AtomicU32::new(d.range_db.min(0.0).to_bits()));
         let attack_ms = Arc::new(AtomicU32::new(d.attack_ms.max(0.01).to_bits()));
         let hold_ms = Arc::new(AtomicU32::new(d.hold_ms.max(0.0).to_bits()));
         let release_ms = Arc::new(AtomicU32::new(d.release_ms.max(0.1).to_bits()));
+        let state_gain = Arc::new(AtomicU32::new(1.0f32.to_bits()));
         let control = EffectControl::NoiseGate {
             threshold_db: threshold_db.clone(),
             range_db: range_db.clone(),
@@ -51,8 +54,10 @@ impl NoiseGateEffect {
                 envelope: 0.0,
                 current_gain: 1.0,
                 hold_remaining: 0,
+                state_gain: state_gain.clone(),
             },
             control,
+            state_gain,
         )
     }
 
@@ -63,6 +68,7 @@ impl NoiseGateEffect {
         hold_ms: Arc<AtomicU32>,
         release_ms: Arc<AtomicU32>,
         sample_rate: u32,
+        state_gain: Arc<AtomicU32>,
     ) -> Self {
         Self {
             threshold_db,
@@ -74,6 +80,7 @@ impl NoiseGateEffect {
             envelope: 0.0,
             current_gain: 1.0,
             hold_remaining: 0,
+            state_gain,
         }
     }
 
@@ -128,6 +135,7 @@ impl NoiseGateEffect {
             frame[0] *= self.current_gain;
             frame[1] *= self.current_gain;
         }
+        store_f32(&self.state_gain, self.current_gain);
     }
 }
 

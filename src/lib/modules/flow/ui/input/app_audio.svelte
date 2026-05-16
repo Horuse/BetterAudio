@@ -48,7 +48,7 @@
 </script>
 
 <Wrapper label="App Audio" accent="input" hasOutput>
-	<div class="flex w-64 flex-col gap-1">
+	<div class="flex w-64 flex-col gap-3">
 		<p class="text-[11px] text-neutral-900">
 			Capture audio from a specific running app (ScreenCaptureKit, macOS 13+).
 		</p>

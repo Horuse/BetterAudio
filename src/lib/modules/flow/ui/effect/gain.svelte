@@ -37,7 +37,7 @@
 	bypassed={data.bypassed}
 	onBypass={toggleBypass}
 >
-	<div class="w-50">
+	<div class="w-48 nowheel nodrag">
 		<Slider
 			label="Level"
 			value={data.gainDb}

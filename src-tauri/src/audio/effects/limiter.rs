@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use crate::audio::graph::LimiterData;
 
-use super::util::{db_to_linear, load_f32};
+use super::util::{db_to_linear, load_f32, store_f32};
 use super::{Effect, EffectControl};
 
 /// Brick-wall limiter: input is delayed by `lookahead_frames`; gain envelope
@@ -21,15 +21,18 @@ pub struct LimiterEffect {
     /// the window = `peak_buf.iter().max()`.
     peak_buf: Box<[f32]>,
     current_gain: f32,
+    /// Min gain during the last block (1.0 = no limiting).
+    pub gr_lin: Arc<AtomicU32>,
 }
 
 impl LimiterEffect {
-    pub fn new(d: LimiterData, sample_rate: u32) -> (Self, EffectControl) {
+    pub fn new(d: LimiterData, sample_rate: u32) -> (Self, EffectControl, Arc<AtomicU32>) {
         let lookahead_frames = ((d.lookahead_ms.max(0.1) * sample_rate as f32 / 1000.0) as usize)
             .max(1);
         let ceiling_lin = db_to_linear(d.ceiling_db).max(1e-6);
         let ceiling = Arc::new(AtomicU32::new(ceiling_lin.to_bits()));
         let release_ms = Arc::new(AtomicU32::new(d.release_ms.max(0.1).to_bits()));
+        let gr_lin = Arc::new(AtomicU32::new(1.0f32.to_bits()));
         let control = EffectControl::Limiter {
             ceiling: ceiling.clone(),
             release_ms: release_ms.clone(),
@@ -44,8 +47,10 @@ impl LimiterEffect {
                 delay_pos: 0,
                 peak_buf: vec![0.0; lookahead_frames].into_boxed_slice(),
                 current_gain: 1.0,
+                gr_lin: gr_lin.clone(),
             },
             control,
+            gr_lin,
         )
     }
 
@@ -54,6 +59,7 @@ impl LimiterEffect {
         release_ms: Arc<AtomicU32>,
         lookahead_frames: usize,
         sample_rate: u32,
+        gr_lin: Arc<AtomicU32>,
     ) -> Self {
         Self {
             ceiling,
@@ -64,6 +70,7 @@ impl LimiterEffect {
             delay_pos: 0,
             peak_buf: vec![0.0; lookahead_frames].into_boxed_slice(),
             current_gain: 1.0,
+            gr_lin,
         }
     }
 }
@@ -77,6 +84,7 @@ impl Effect for LimiterEffect {
 
         let lookahead = self.lookahead_frames;
         let stereo = &mut samples[..frames * 2];
+        let mut block_min_gr = 1.0f32;
         for f in 0..frames {
             let l_in = stereo[f * 2];
             let r_in = stereo[f * 2 + 1];
@@ -102,9 +110,13 @@ impl Effect for LimiterEffect {
                 self.current_gain += (target - self.current_gain) * release_coeff;
             }
 
+            if self.current_gain < block_min_gr {
+                block_min_gr = self.current_gain;
+            }
             stereo[f * 2] = l_out * self.current_gain;
             stereo[f * 2 + 1] = r_out * self.current_gain;
         }
+        store_f32(&self.gr_lin, block_min_gr);
     }
 
     fn latency_frames(&self) -> usize {

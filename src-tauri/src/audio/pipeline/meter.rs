@@ -6,10 +6,11 @@ use std::time::Duration;
 use serde_json::json;
 use tauri::{AppHandle, Emitter};
 
-use crate::audio::effects::{LufsHandle, MeterHandle};
+use crate::audio::effects::{GrHandle, LufsHandle, MeterHandle};
 
 const METER_EVENT: &str = "audio://meter";
 const LUFS_EVENT: &str = "audio://lufs";
+const GR_EVENT: &str = "audio://gr";
 const METER_TICK: Duration = Duration::from_millis(33);
 
 pub(super) struct MeterTickThread {
@@ -30,6 +31,7 @@ pub(super) fn spawn_meter_thread(
     app: AppHandle,
     meters: Vec<MeterHandle>,
     lufs: Vec<LufsHandle>,
+    gr_handles: Vec<GrHandle>,
 ) -> MeterTickThread {
     let stop = Arc::new(AtomicBool::new(false));
     let stop_thread = stop.clone();
@@ -64,6 +66,10 @@ pub(super) fn spawn_meter_thread(
                             "tpR": snap.tp_r,
                         }),
                     );
+                }
+                for g in &gr_handles {
+                    let gr_lin = f32::from_bits(g.gr_lin.load(std::sync::atomic::Ordering::Relaxed));
+                    let _ = app.emit(GR_EVENT, json!({ "nodeId": g.node_id, "grLin": gr_lin }));
                 }
             }
         })

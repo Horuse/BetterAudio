@@ -21,7 +21,7 @@
 	const F_MIN = 20;
 	const F_MAX = 20_000;
 	const DB_RANGE = 18;
-	const CURVE_W = 280;
+	const CURVE_W = 325;
 	const CURVE_H = 70;
 	const POINTS = 200;
 

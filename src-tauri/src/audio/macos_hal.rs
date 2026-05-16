@@ -36,6 +36,7 @@ const K_AUDIO_DEVICE_PROPERTY_STREAMS: AudioObjectPropertySelector = fourcc(b"st
 const K_AUDIO_DEVICE_PROPERTY_STREAM_CONFIGURATION: AudioObjectPropertySelector = fourcc(b"slay");
 const K_AUDIO_DEVICE_PROPERTY_NOMINAL_SAMPLE_RATE: AudioObjectPropertySelector = fourcc(b"nsrt");
 const K_AUDIO_DEVICE_PROPERTY_VOLUME_SCALAR: AudioObjectPropertySelector = fourcc(b"volm");
+const K_AUDIO_DEVICE_PROPERTY_MUTE: AudioObjectPropertySelector = fourcc(b"mute");
 const K_AUDIO_OBJECT_PROPERTY_NAME: AudioObjectPropertySelector = fourcc(b"lnam");
 const K_AUDIO_OBJECT_PROPERTY_SCOPE_GLOBAL: AudioObjectPropertyScope = fourcc(b"glob");
 const K_AUDIO_OBJECT_PROPERTY_SCOPE_INPUT: AudioObjectPropertyScope = fourcc(b"inpt");
@@ -405,6 +406,36 @@ unsafe fn write_volume_for_element(
     ) == 0
 }
 
+unsafe fn write_mute_for_element(
+    device_id: AudioObjectID,
+    scope: AudioObjectPropertyScope,
+    element: u32,
+    muted: bool,
+) -> bool {
+    let addr = AudioObjectPropertyAddress {
+        selector: K_AUDIO_DEVICE_PROPERTY_MUTE,
+        scope,
+        element,
+    };
+    if !AudioObjectHasProperty(device_id, &addr) {
+        return false;
+    }
+    let mut settable = false;
+    if AudioObjectIsPropertySettable(device_id, &addr, &mut settable) != 0 || !settable {
+        return false;
+    }
+    let v: u32 = muted as u32;
+    let size = mem::size_of::<u32>() as u32;
+    AudioObjectSetPropertyData(
+        device_id,
+        &addr,
+        0,
+        ptr::null(),
+        size,
+        &v as *const _ as *const c_void,
+    ) == 0
+}
+
 /// Returns None when CoreAudio exposes no settable volume — common for
 /// hardware-knob interfaces and some USB mics.
 pub fn device_volume(kind: crate::audio::device::DeviceKind, name: &str) -> Option<f32> {
@@ -438,12 +469,25 @@ pub fn set_device_volume(
         return false;
     };
     unsafe {
-        if write_volume_for_element(
-            device_id,
-            scope,
-            K_AUDIO_OBJECT_PROPERTY_ELEMENT_MAIN,
-            scalar,
-        ) {
+        if scalar <= 0.0 {
+            // kAudioDevicePropertyVolumeScalar 0.0 maps to the device's minimum dB
+            // (not -infinity) on many devices, so a boosting effect can still be
+            // heard. Engage the mute property to guarantee true silence.
+            write_volume_for_element(device_id, scope, K_AUDIO_OBJECT_PROPERTY_ELEMENT_MAIN, 0.0);
+            write_volume_for_element(device_id, scope, 1, 0.0);
+            write_volume_for_element(device_id, scope, 2, 0.0);
+            if write_mute_for_element(device_id, scope, K_AUDIO_OBJECT_PROPERTY_ELEMENT_MAIN, true) {
+                return true;
+            }
+            let l = write_mute_for_element(device_id, scope, 1, true);
+            let r = write_mute_for_element(device_id, scope, 2, true);
+            return l || r;
+        }
+        // Non-zero: clear mute so audio can pass through, then apply scalar.
+        let _ = write_mute_for_element(device_id, scope, K_AUDIO_OBJECT_PROPERTY_ELEMENT_MAIN, false);
+        let _ = write_mute_for_element(device_id, scope, 1, false);
+        let _ = write_mute_for_element(device_id, scope, 2, false);
+        if write_volume_for_element(device_id, scope, K_AUDIO_OBJECT_PROPERTY_ELEMENT_MAIN, scalar) {
             return true;
         }
         let l = write_volume_for_element(device_id, scope, 1, scalar);

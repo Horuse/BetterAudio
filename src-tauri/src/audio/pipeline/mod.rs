@@ -21,7 +21,7 @@ use tauri::AppHandle;
 use tracing::{info, warn};
 
 use crate::audio::device::DeviceKind;
-use crate::audio::effects::{EffectControl, EffectRegistry, LufsHandle, MeterHandle};
+use crate::audio::effects::{EffectControl, EffectRegistry, GrHandle, LufsHandle, MeterHandle};
 use crate::audio::graph::{InputSpec, OutputSpec, RecordingFormat, ValidGraph};
 use crate::audio::input_bridge::{broadcast_channel, BroadcastTx};
 use crate::error::{AppError, AppResult};
@@ -68,6 +68,7 @@ pub struct ActivePipeline {
 
     meters: HashMap<String, MeterHandle>,
     lufs: HashMap<String, LufsHandle>,
+    gr_handles: HashMap<String, GrHandle>,
     meter_thread: Option<MeterTickThread>,
 }
 
@@ -117,6 +118,7 @@ impl ActivePipeline {
             effect_bypasses: HashMap::new(),
             meters: HashMap::new(),
             lufs: HashMap::new(),
+            gr_handles: HashMap::new(),
             meter_thread: None,
         }
     }
@@ -201,6 +203,7 @@ impl ActivePipeline {
         self.tear_down_outputs();
         self.inputs.clear();
         self.meters.clear();
+        self.gr_handles.clear();
     }
 
     /// Drop outputs (speakers, recorders, monitor) and effect state, but
@@ -226,6 +229,7 @@ impl ActivePipeline {
         let input_ids: HashSet<String> = self.inputs.keys().cloned().collect();
         self.meters.retain(|id, _| input_ids.contains(id));
         self.lufs.clear();
+        self.gr_handles.clear();
         self.effect_registry = EffectRegistry::new();
     }
 
@@ -489,6 +493,9 @@ impl ActivePipeline {
             for l in built.lufs {
                 self.lufs.insert(l.node_id.clone(), l);
             }
+            for g in built.gr_handles {
+                self.gr_handles.insert(g.node_id.clone(), g);
+            }
             output_graphs.insert(out.id.clone(), built.graph);
         }
 
@@ -670,12 +677,13 @@ impl ActivePipeline {
         // Respawn the meter tick thread so it picks up new/changed
         // handles. The old thread (if any) was dropped by `teardown_*` /
         // `prepare_for_reconcile`.
-        self.meter_thread = if self.meters.is_empty() && self.lufs.is_empty() {
+        self.meter_thread = if self.meters.is_empty() && self.lufs.is_empty() && self.gr_handles.is_empty() {
             None
         } else {
             let meters_snapshot: Vec<MeterHandle> = self.meters.values().cloned().collect();
             let lufs_snapshot: Vec<LufsHandle> = self.lufs.values().cloned().collect();
-            Some(spawn_meter_thread(app, meters_snapshot, lufs_snapshot))
+            let gr_snapshot: Vec<GrHandle> = self.gr_handles.values().cloned().collect();
+            Some(spawn_meter_thread(app, meters_snapshot, lufs_snapshot, gr_snapshot))
         };
 
         Ok(())

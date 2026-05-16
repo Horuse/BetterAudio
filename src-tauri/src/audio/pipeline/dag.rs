@@ -7,7 +7,8 @@ use rtrb::{Consumer, Producer, RingBuffer};
 use tracing::{info, warn};
 
 use crate::audio::effects::{
-    instantiate_effect, EffectControl, EffectRegistry, LufsHandle, MeterHandle, RuntimeEffect,
+    instantiate_effect, EffectControl, EffectRegistry, GrHandle, LufsHandle, MeterHandle,
+    RuntimeEffect,
 };
 use crate::audio::graph::{EdgeKind, ValidGraph};
 use crate::audio::resample::StereoResampler;
@@ -378,6 +379,7 @@ pub(super) struct BuiltOutputGraph {
     pub bypasses: Vec<(String, Arc<AtomicBool>)>,
     pub meters: Vec<MeterHandle>,
     pub lufs: Vec<LufsHandle>,
+    pub gr_handles: Vec<GrHandle>,
 }
 
 /// Build the per-output DAG: walk backward from `output_id`, topo-sort the
@@ -454,6 +456,7 @@ pub(super) fn build_output_graph(
     let mut bypasses: Vec<(String, Arc<AtomicBool>)> = Vec::new();
     let mut meters: Vec<MeterHandle> = Vec::new();
     let mut lufs: Vec<LufsHandle> = Vec::new();
+    let mut gr_handles: Vec<GrHandle> = Vec::new();
     let mut node_latencies: Vec<usize> = Vec::with_capacity(topo.len());
 
     for id in &topo {
@@ -506,6 +509,9 @@ pub(super) fn build_output_graph(
             }
             if let Some(l) = build.lufs {
                 lufs.push(l);
+            }
+            if let Some(g) = build.gr {
+                gr_handles.push(g);
             }
             let bypass = build.bypass;
             let mut main_upstream: Vec<usize> = Vec::new();
@@ -591,6 +597,7 @@ pub(super) fn build_output_graph(
         bypasses,
         meters,
         lufs,
+        gr_handles,
     })
 }
 

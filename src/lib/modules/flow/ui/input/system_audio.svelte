@@ -44,7 +44,7 @@
 </script>
 
 <Wrapper label="System Audio" accent="input" hasOutput>
-	<div class="flex w-64 flex-col gap-1.5">
+	<div class="flex w-64 flex-col gap-3">
 		<p class="text-[11px] text-neutral-900">
 			Captures all system output via ScreenCaptureKit (macOS 13+).
 		</p>

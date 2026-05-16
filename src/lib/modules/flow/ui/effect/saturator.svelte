@@ -28,7 +28,7 @@
 	}
 
 	// Transfer curve mirrors `SaturatorEffect` in effects.rs: y = c·tanh(x·d/c).
-	const CURVE_W = 80;
+	const CURVE_W = 120;
 	const CURVE_H = 60;
 	const X_MIN = -1.2;
 	const X_MAX = 1.2;
@@ -73,7 +73,7 @@
 		<div class="flex items-start gap-2">
 			<svg
 				viewBox="0 0 {CURVE_W} {CURVE_H}"
-				class="h-16 w-20 shrink-0 rounded border border-neutral-300 bg-neutral-100"
+				class="h-16 w-32 shrink-0 rounded border border-neutral-300 bg-neutral-100"
 				role="img"
 				aria-label="Transfer curve preview"
 			>
@@ -88,8 +88,8 @@
 				<line x1="0" y1={ceilingYNeg()} x2={CURVE_W} y2={ceilingYNeg()} stroke="rgb(239 68 68)" stroke-width="0.3" stroke-dasharray="1 1" opacity="0.5" />
 				<path d={curvePath(data.thresholdDb, data.driveDb)} stroke="rgb(245 158 11)" stroke-width="1.2" fill="none" />
 			</svg>
-			<div class="flex flex-col gap-0.5 text-[9px] text-neutral-900">
-				<span class="rounded bg-neutral-200 px-1 py-0.5 font-mono leading-tight">tanh</span>
+			<div class="flex flex-col my-auto gap-0.5 text-[9px] text-neutral-900">
+				<span class="rounded bg-neutral-200 font-mono leading-tight">tanh</span>
 				<span class="opacity-60">in → out</span>
 				<span class="opacity-60">unity dashed</span>
 			</div>

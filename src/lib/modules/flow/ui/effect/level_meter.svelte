@@ -30,7 +30,6 @@
 	let clipL = $state(false);
 	let clipR = $state(false);
 
-	// Hover tooltip
 	let hoverDb = $state<number | null>(null);
 	let hoverY = $state(0);
 
@@ -39,11 +38,8 @@
 	const HOLD_TIME_MS = 1500;
 	const HOLD_FALL_DB_PER_SEC = 20;
 
-	const dbLabels = Array.from({ length: 20 }, (_, i) => -i * 3);
 	const minorTicks = Array.from({ length: 60 }, (_, i) => -i);
-
 	const minorTickPos = minorTicks.map((db) => ({ db, pct: dbToPct(db), major: db % 3 === 0 }));
-	const dbLabelPos = dbLabels.map((db) => ({ db, pct: dbToPct(db) }));
 
 	const METER_GRADIENT = `linear-gradient(to top,
         #22c55e 0%, #22c55e 70%,
@@ -77,19 +73,23 @@
 		return isFinite(db) ? db.toFixed(1) : '−∞';
 	}
 
-	// Max readout background color, based on the highest peak ever reached
 	function maxBgClass(maxL: number, maxR: number): string {
 		const m = Math.max(maxL, maxR);
-		if (!isFinite(m)) return 'bg-neutral-200';
-		if (m >= -1) return 'bg-red-300';
-		if (m >= -6) return 'bg-amber-200';
-		return 'bg-neutral-200';
+		if (!isFinite(m)) return 'bg-neutral-200  text-neutral-300';
+		if (m >= -1) return 'bg-red-500/50 !text-red-700 dark:!text-red-300';
+		if (m >= -6) return 'bg-yellow-500/90 border-black/10 !text-yellow-700';
+		return 'bg-neutral-200 text-neutral-400';
 	}
 
 	function handleBarHover(e: MouseEvent) {
-		const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
-		const y = e.clientY - rect.top;
-		const pct = Math.max(0, Math.min(100, 100 - (y / rect.height) * 100));
+		const el = e.currentTarget as HTMLElement;
+		const rect = el.getBoundingClientRect();
+		// rect is in screen pixels; el.offsetHeight is in CSS pixels (pre-transform).
+		// Dividing by the scale converts screen pixels to local CSS pixels so that
+		// `top: hoverY` lands exactly on the cursor when the canvas is zoomed.
+		const scale = rect.height / el.offsetHeight;
+		const y = (e.clientY - rect.top) / scale;
+		const pct = Math.max(0, Math.min(100, 100 - (y / el.offsetHeight) * 100));
 		hoverDb = pctToDb(pct);
 		hoverY = y;
 	}
@@ -192,7 +192,6 @@
 	<div class="flex w-fit flex-col gap-1">
 		<div class="flex gap-1.5">
 			<div class="flex flex-col gap-0.5">
-				<!-- Clip LEDs -->
 				<div class="flex h-2 w-16 overflow-hidden rounded-sm border border-neutral-300">
 					{#each [{ c: clipL, lab: 'L' }, { c: clipR, lab: 'R' }] as item, i (i)}
 						<button
@@ -206,7 +205,6 @@
 					{/each}
 				</div>
 
-				<!-- Meter with hover and click-to-reset -->
 				<div
 					class="relative flex h-72 w-16 cursor-crosshair overflow-hidden rounded-sm border border-neutral-300"
 					style="--bar-h: 288px;"
@@ -245,7 +243,6 @@
 						</div>
 					{/each}
 
-					<!-- Hover line + dB badge -->
 					{#if hoverDb !== null}
 						<div
 							class="pointer-events-none absolute right-0 left-0 z-10 h-px bg-cyan-400"
@@ -262,59 +259,51 @@
 				</div>
 			</div>
 
-			<!-- dB scale -->
 			<div
 				class="relative h-72 w-8 font-mono text-[9px] text-neutral-900 select-none"
-				style="margin-top: 10px;"
+				style="margin-top: 12px;"
 			>
 				{#each minorTickPos as t (t.db)}
 					<div
-						class="absolute left-0 h-px bg-neutral-700 {t.major ? 'w-2' : 'w-1'}"
-						style="bottom: {t.pct}%;"
-					></div>
-				{/each}
-				{#each dbLabelPos as l (l.db)}
-					<div
-						class="absolute left-2.5 -translate-y-1/2 leading-none"
-						style="bottom: {l.pct}%;"
+						class="absolute left-0 flex items-center"
+						style="bottom: {t.pct}%; height: 1px;"
 					>
-						{l.db}
+						<div class="shrink-0 bg-neutral-700 {t.major ? 'w-2' : 'w-1'}" style="height: 1px;"></div>
+						{#if t.major}
+							<span class="ml-0.5 mb-px leading-none">{t.db}</span>
+						{/if}
 					</div>
 				{/each}
 				<div class="absolute bottom-0 left-2.5 leading-none">dB</div>
 			</div>
 		</div>
 
-		<!-- Max readout; background tints when the max has been hot -->
+		<!-- Live dB readout -->
+		<div class="flex w-16 overflow-hidden rounded-sm border border-neutral-300 bg-neutral-100">
+			{#each [{ db: displayPeakL, label: 'L' }, { db: displayPeakR, label: 'R' }] as ch, i (i)}
+				<div class="flex flex-1 flex-col items-center py-0.5 {i === 0 ? 'border-r border-neutral-300' : ''}">
+					<span class="text-[7px] text-neutral-400 leading-none">{ch.label}</span>
+					<span class="font-mono tabular-nums text-[8px] leading-tight {!isFinite(ch.db) ? 'text-neutral-400' : ch.db >= -1 ? 'text-red-500' : ch.db >= -6 ? 'text-amber-500' : 'text-neutral-700'}">
+						{formatDb(ch.db)}
+					</span>
+				</div>
+			{/each}
+		</div>
+
 		<button
 			type="button"
 			onclick={resetPeaks}
 			title="Reset peaks"
-			class="flex w-16 flex-col rounded-sm border border-neutral-300 px-1 py-0.5 font-mono text-[9px] text-neutral-900 transition-colors hover:opacity-80 {maxBgClass(maxPeakL, maxPeakR)}"
+			class="flex w-16 overflow-hidden rounded-sm border border-neutral-300 transition-colors hover:opacity-80 {maxBgClass(maxPeakL, maxPeakR)}"
 		>
-			<div class="flex justify-between">
-				<span class="opacity-60">L</span>
-				<span>{formatDb(maxPeakL)}</span>
-			</div>
-			<div class="flex justify-between">
-				<span class="opacity-60">R</span>
-				<span>{formatDb(maxPeakR)}</span>
-			</div>
-		</button>
-
-		<!-- Solo -->
-		<div class="flex w-16 overflow-hidden rounded-sm border border-neutral-300">
-			{#each ['L', 'R'] as ch, i (ch)}
-				<button
-					type="button"
-					aria-label="Solo {ch}"
-					class="flex h-4 flex-1 items-center justify-center bg-neutral-200 font-mono text-[9px] text-neutral-900 hover:bg-neutral-300 {i === 0
-                   ? 'border-r border-neutral-300'
-                   : ''}"
-				>
-					S
-				</button>
+			{#each [{ db: maxPeakL, label: 'L' }, { db: maxPeakR, label: 'R' }] as ch, i (i)}
+				<div class="flex flex-1 flex-col items-center py-0.5 {i === 0 ? 'border-r border-neutral-300' : ''}">
+					<span class="text-[7px] leading-none">{ch.label}</span>
+					<span class="font-mono tabular-nums text-[8px] leading-tight">
+						{formatDb(ch.db)}
+					</span>
+				</div>
 			{/each}
-		</div>
+		</button>
 	</div>
 </Wrapper>
