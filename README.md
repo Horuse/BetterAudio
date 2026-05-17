@@ -32,6 +32,20 @@ files in any of six formats.
   compiled by `build.rs` via `swiftc`; CoreAudio HAL FFI for device
   enumeration; libASPL-based AudioServerPlugin for virtual device driver
 
+## Installation
+
+Download the latest `.dmg` from [Releases](https://github.com/Horuse/Splitwave/releases/latest),
+open it, and drag Splitwave to Applications.
+
+**macOS will block the app on first launch** ("cannot verify developer") because the
+binary is not notarized. To allow it, run once in Terminal:
+
+```bash
+xattr -cr /Applications/Splitwave.app
+```
+
+Then open Splitwave normally.
+
 ## Development
 
 ### Prerequisites
