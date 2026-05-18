@@ -85,7 +85,7 @@ pub fn apply_virtual_devices(devices: Vec<VirtualDeviceConfig>) -> Result<(), St
     set src to item 1 of argv
     set dstDir to "/Library/Audio/Plug-Ins/HAL/Splitwave.driver/Contents/Resources"
     set dst to dstDir & "/devices.plist"
-    do shell script "mkdir -p " & quoted form of dstDir & " && cp " & quoted form of src & " " & quoted form of dst & "; s=$?; killall -9 coreaudiod 2>/dev/null; exit $s" with administrator privileges
+    do shell script "mkdir -p " & quoted form of dstDir & " && cp " & quoted form of src & " " & quoted form of dst & " && chmod 644 " & quoted form of dst & "; s=$?; killall -9 coreaudiod 2>/dev/null; exit $s" with administrator privileges
 end run"#;
 
     let out = Command::new("osascript")
