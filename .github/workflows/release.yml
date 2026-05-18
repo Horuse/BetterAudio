@@ -45,6 +45,6 @@ jobs:
           projectPath: src-tauri
           tagName: ${{ github.ref_name }}
           releaseName: Splitwave ${{ github.ref_name }}
-          releaseDraft: false
+          releaseDraft: true
           prerelease: false
           args: --bundles dmg,updater
