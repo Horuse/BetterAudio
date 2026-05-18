@@ -14,6 +14,7 @@ class AudioStore {
 	runningPipelineId = $state<string | null>(null);
 	startedAt = $state<number | null>(null);
 	lastError = $state<string | null>(null);
+	chooseFileNodeId = $state<string | null>(null);
 
 	private unlisten: UnlistenFn | undefined;
 
@@ -63,7 +64,12 @@ class AudioStore {
 	}
 
 	async activatePipeline(pipelineId: string, graph: StartPipelinePayload): Promise<void> {
-		await methods.startPipeline(graph);
+		try {
+			await methods.startPipeline(graph);
+		} catch (e) {
+			if (this.routeStartError(e)) return;
+			throw e;
+		}
 		this.runningPipelineId = pipelineId;
 	}
 
@@ -72,16 +78,33 @@ class AudioStore {
 	 * streams stay alive across edits when their spec is unchanged.
 	 * Falls back to stop + start if the pipeline isn't running. */
 	async restartPipeline(graph: StartPipelinePayload): Promise<void> {
+		let reconcileErr: unknown;
 		try {
 			await methods.reconcilePipeline(graph);
+			return;
 		} catch (e) {
-			const msg = e instanceof Error ? e.message : String(e);
-			if (msg.includes('not running')) {
+			reconcileErr = e;
+		}
+		const msg = reconcileErr instanceof Error ? reconcileErr.message : String(reconcileErr);
+		if (msg.includes('not running')) {
+			try {
 				await methods.startPipeline(graph);
-			} else {
+			} catch (e) {
+				if (this.routeStartError(e)) return;
 				throw e;
 			}
+		} else {
+			if (this.routeStartError(reconcileErr)) return;
+			throw reconcileErr;
 		}
+	}
+
+	private routeStartError(e: unknown): boolean {
+		const msg = e instanceof Error ? e.message : String(e);
+		const m = /choose-file \(node ([^)]+)\)/.exec(msg);
+		if (!m) return false;
+		this.chooseFileNodeId = m[1];
+		return true;
 	}
 
 	destroy(): void {

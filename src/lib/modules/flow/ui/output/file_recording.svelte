@@ -2,7 +2,7 @@
 	import { save } from '@tauri-apps/plugin-dialog';
 	import { openPath } from '@tauri-apps/plugin-opener';
 	import { listen, type UnlistenFn } from '@tauri-apps/api/event';
-	import { onDestroy, onMount } from 'svelte';
+	import { onDestroy, onMount, untrack } from 'svelte';
 	import { useSvelteFlow, type Node, type NodeProps } from '@xyflow/svelte';
 	import type {
 		AiffBitDepth,
@@ -33,6 +33,7 @@
 	let frames = $state(0);
 	let sampleRate = $state(0);
 	let recording = $state(false);
+	let committedFormat = $state<RecordingFormat | null>(null);
 
 	let unlisten: UnlistenFn | undefined;
 	let unlistenChoose: (() => void) | undefined;
@@ -45,13 +46,36 @@
 			if (p.nodeId !== id) return;
 			frames = p.frames;
 			sampleRate = p.sampleRate;
-			recording = !p.stopped;
+			if (!p.stopped) {
+				recording = true;
+			} else {
+				recording = false;
+				committedFormat = null;
+			}
 		});
 	});
 
 	$effect(() => {
-		if (!audioStore.isRunning) {
+		if (audioStore.isRunning) {
+			if (untrack(() => committedFormat) === null) {
+				committedFormat = untrack(() => data.format);
+			}
+		} else {
+			const cf = untrack(() => committedFormat);
+			const fmt = untrack(() => data.format);
+			const fp = untrack(() => data.filePath);
+			if (cf !== null && cf.kind !== fmt.kind && fp) {
+				flow.updateNodeData(id, { filePath: replaceExtension(fp, extension(fmt)) });
+			}
 			recording = false;
+			committedFormat = null;
+		}
+	});
+
+	$effect(() => {
+		if (audioStore.chooseFileNodeId === id) {
+			audioStore.chooseFileNodeId = null;
+			chooseFile().catch(() => {});
 		}
 	});
 
@@ -75,7 +99,7 @@
 			title: 'Save recording',
 			filters: [{ name: ext.toUpperCase(), extensions: [ext] }]
 		});
-		if (path) flow.updateNodeData(id, { filePath: path });
+		if (path) flow.updateNodeData(id, { filePath: path, allowOverwrite: true });
 	}
 
 	function replaceExtension(path: string, newExt: string): string {
@@ -97,7 +121,7 @@
 		else if (kind === 'aac') next = { kind: 'aac', bitrate: 192_000 };
 		else next = { kind: 'aiff', bitDepth: 'i24' };
 		const patch: Partial<FileRecordingNodeData> = { format: next };
-		if (data.filePath) {
+		if (data.filePath && !audioStore.isRunning) {
 			patch.filePath = replaceExtension(data.filePath, extension(next));
 		}
 		flow.updateNodeData(id, patch);
@@ -262,28 +286,33 @@
 		return frames * AIFF_BYTES_PER_FRAME[data.format.bitDepth] + 54;
 	}
 
-	function formatLabel(): string {
-		if (data.format.kind === 'wav') {
-			const bd = data.format.bitDepth;
+	function formatLabelFor(fmt: RecordingFormat): string {
+		if (fmt.kind === 'wav') {
+			const bd = fmt.bitDepth;
 			return bd === 'i16' ? 'WAV PCM 16-bit' : bd === 'i24' ? 'WAV PCM 24-bit' : 'WAV 32-bit float';
 		}
-		if (data.format.kind === 'flac') {
-			return `FLAC ${data.format.bitDepth === 'i24' ? '24-bit' : '16-bit'} · ${data.format.compression}`;
+		if (fmt.kind === 'flac') {
+			return `FLAC ${fmt.bitDepth === 'i24' ? '24-bit' : '16-bit'} · ${fmt.compression}`;
 		}
-		if (data.format.kind === 'opus') {
-			return `Opus ${Math.round(data.format.bitrate / 1000)} kbps · ${data.format.application}`;
+		if (fmt.kind === 'opus') {
+			return `Opus ${Math.round(fmt.bitrate / 1000)} kbps · ${fmt.application}`;
 		}
-		if (data.format.kind === 'mp3') {
-			return `MP3 ${data.format.bitrateKbps} kbps`;
+		if (fmt.kind === 'mp3') {
+			return `MP3 ${fmt.bitrateKbps} kbps`;
 		}
-		if (data.format.kind === 'aac') {
-			return `AAC ${Math.round(data.format.bitrate / 1000)} kbps · M4A`;
+		if (fmt.kind === 'aac') {
+			return `AAC ${Math.round(fmt.bitrate / 1000)} kbps · M4A`;
 		}
-		return `AIFF PCM ${data.format.bitDepth === 'i24' ? '24-bit' : '16-bit'}`;
+		return `AIFF PCM ${fmt.bitDepth === 'i24' ? '24-bit' : '16-bit'}`;
 	}
 
 	let estSize = $derived(estimatedSize());
 	let durationSec = $derived(sampleRate > 0 ? frames / sampleRate : 0);
+	let dirty = $derived(
+		recording &&
+		committedFormat !== null &&
+		JSON.stringify(committedFormat) !== JSON.stringify(data.format)
+	);
 </script>
 
 <Wrapper label="File Recording" accent="output" hasInput>
@@ -308,6 +337,15 @@
 				<Folder class="h-3.5 w-3.5" />
 			</button>
 		</div>
+		<label class="nodrag nopan flex cursor-pointer items-center gap-1.5 text-[10px] text-neutral-700">
+			<input
+				type="checkbox"
+				class="accent-neutral-900"
+				checked={data.allowOverwrite}
+				onchange={(e) => flow.updateNodeData(id, { allowOverwrite: e.currentTarget.checked })}
+			/>
+			Allow overwrite
+		</label>
 
 		<div class="nodrag nopan grid grid-cols-6 gap-[2px] rounded-sm border border-neutral-300 p-[2px]">
 			{#each [{ k: 'wav' as const, label: 'WAV' }, { k: 'flac' as const, label: 'FLAC' }, { k: 'aiff' as const, label: 'AIFF' }, { k: 'opus' as const, label: 'Opus' }, { k: 'mp3' as const, label: 'MP3' }, { k: 'aac' as const, label: 'AAC' }] as fmt (fmt.k)}
@@ -475,8 +513,11 @@
 			<span class="text-neutral-1000 tabular-nums">{formatDuration(durationSec)}</span>
 		</div>
 		<div class="flex justify-between text-[10px] text-neutral-900">
-			<span>{formatLabel()} · stereo</span>
+			<span>{formatLabelFor(recording && committedFormat !== null ? committedFormat : data.format)} · stereo</span>
 			<span class="font-mono tabular-nums">{formatSize(estSize)}</span>
 		</div>
+		{#if dirty}
+			<div class="text-[9px] text-amber-600">changes pending - restart or choose new file</div>
+		{/if}
 	</div>
 </Wrapper>

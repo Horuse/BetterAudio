@@ -209,6 +209,8 @@ pub struct FileRecordingData {
     pub file_path: Option<String>,
     #[serde(default)]
     pub format: RecordingFormat,
+    #[serde(default)]
+    pub allow_overwrite: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Deserialize, TS)]
@@ -596,10 +598,19 @@ impl GraphSpec {
                 }
                 NodeKind::FileRecording => {
                     let data: FileRecordingData = parse(&n.data, "FileRecording")?;
+                    let file_path = data
+                        .file_path
+                        .ok_or_else(|| miss(&n.id, "File Recording has no path"))?;
+                    let path = std::path::Path::new(&file_path);
+                    let parent = path.parent().unwrap_or(std::path::Path::new("."));
+                    if !parent.exists() {
+                        return Err(choose_file_err(&n.id, "directory does not exist"));
+                    }
+                    if !data.allow_overwrite && path.exists() {
+                        return Err(choose_file_err(&n.id, "file already exists"));
+                    }
                     OutputSpec::FileRecording {
-                        file_path: data
-                            .file_path
-                            .ok_or_else(|| miss(&n.id, "File Recording has no path"))?,
+                        file_path,
                         format: data.format,
                     }
                 }
@@ -702,6 +713,10 @@ fn parse<T: for<'de> Deserialize<'de>>(value: &serde_json::Value, ctx: &str) -> 
 
 fn miss(node_id: &str, msg: &str) -> AppError {
     AppError::Validation(format!("{msg} (node {node_id})"))
+}
+
+fn choose_file_err(node_id: &str, reason: &str) -> AppError {
+    AppError::Validation(format!("choose-file (node {node_id}): {reason}"))
 }
 
 fn check_acyclic(nodes: &[NodeSpec], outgoing: &HashMap<&str, Vec<&str>>) -> AppResult<()> {
