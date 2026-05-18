@@ -1,12 +1,9 @@
-# Splitwave
-
 [![Downloads](https://img.shields.io/github/downloads/Horuse/Splitwave/total.svg)](https://github.com/Horuse/Splitwave/releases/latest)
+# Splitwave
+Splitwave is a node-based audio router for macOS. Wire microphones, system audio, per-app capture, and WAV files into a visual graph, run them through a chain of effects — EQ, compression, reverb, limiting, and more — then send the result to speakers or record it in WAV, FLAC, AIFF, MP3, Opus, or AAC.
 
 ![Splitwave preview](./preview.png)
 
-Audio routing for macOS. Build a node graph of inputs, effects, and outputs;
-the engine processes audio in real time with sample-accurate DSP and writes to
-files in any of six formats.
 
 ## Installation
 
@@ -38,7 +35,7 @@ Then open Splitwave normally.
 
 ## Stack
 
-- **Frontend:** SvelteKit 5 (runes), Tauri 2, xyflow, Tailwind 4
+- **Frontend:** Svelte, Tauri, @xyflow/svelte
 - **Engine:** Rust -- `cpal` (device I/O), `rtrb` (SPSC ring buffers), `rubato`
   (resampling), `hound` (WAV), `flac-codec`, `opus`, `mp3lame-encoder`,
   `ebur128`
