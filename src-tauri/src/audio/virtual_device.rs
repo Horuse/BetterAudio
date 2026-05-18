@@ -1,16 +1,48 @@
+use std::io::Write;
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
 use std::process::Command;
 
 use tauri::{AppHandle, Manager};
 use tracing::{error, info};
 
-// Reject paths that would escape single-quote shell quoting.
+// Reject paths that would escape single-quote shell quoting or the enclosing AppleScript string.
 fn shell_safe(path: &Path) -> Result<&str, String> {
     let s = path.to_str().ok_or("path is not valid UTF-8")?;
-    if s.contains('\'') || s.contains('\n') || s.contains('\r') {
+    if s.contains('\'') || s.contains('"') || s.contains('\\') || s.contains('\n') || s.contains('\r') {
         return Err(format!("path contains unsafe characters: {s}"));
     }
     Ok(s)
+}
+
+struct TempPlist(std::path::PathBuf);
+
+impl Drop for TempPlist {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
+fn write_temp_plist(content: &str) -> Result<TempPlist, String> {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .subsec_nanos();
+    let path = std::path::PathBuf::from(format!(
+        "/tmp/splitwave_devices_{}_{}.plist",
+        std::process::id(),
+        nanos
+    ));
+    let f = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&path)
+        .map_err(|e| format!("create temp plist: {e}"))?;
+    let guard = TempPlist(path);
+    { let mut f = f; f.write_all(content.as_bytes()) }
+        .map_err(|e| format!("write temp plist: {e}"))?;
+    Ok(guard)
 }
 
 #[derive(Debug, Clone, serde::Deserialize)]
@@ -47,26 +79,21 @@ pub fn apply_virtual_devices(devices: Vec<VirtualDeviceConfig>) -> Result<(), St
     }
     plist.push_str("</array>\n</plist>\n");
 
-    let tmp = format!("/tmp/splitwave_devices_{}.plist", std::process::id());
-    std::fs::write(&tmp, &plist).map_err(|e| format!("write temp plist: {e}"))?;
+    let tmp = write_temp_plist(&plist)?;
 
-    let tmp_safe = shell_safe(Path::new(&tmp))?;
-    let script = format!(
-        concat!(
-            r#"do shell script "mkdir -p '/Library/Audio/Plug-Ins/HAL/Splitwave.driver/Contents/Resources'"#,
-            r#" && cp '{src}' '/Library/Audio/Plug-Ins/HAL/Splitwave.driver/Contents/Resources/devices.plist'"#,
-            r#"; s=$?; killall -9 coreaudiod 2>/dev/null; exit $s" "#,
-            r#"with administrator privileges"#,
-        ),
-        src = tmp_safe,
-    );
+    const SCRIPT: &str = r#"on run argv
+    set src to item 1 of argv
+    set dstDir to "/Library/Audio/Plug-Ins/HAL/Splitwave.driver/Contents/Resources"
+    set dst to dstDir & "/devices.plist"
+    do shell script "mkdir -p " & quoted form of dstDir & " && cp " & quoted form of src & " " & quoted form of dst & "; s=$?; killall -9 coreaudiod 2>/dev/null; exit $s" with administrator privileges
+end run"#;
 
     let out = Command::new("osascript")
-        .args(["-e", &script])
+        .arg("-e").arg(SCRIPT)
+        .arg("--")
+        .arg(&tmp.0)
         .output()
         .map_err(|e| format!("osascript failed: {e}"))?;
-
-    let _ = std::fs::remove_file(&tmp);
 
     if !out.status.success() {
         let msg = String::from_utf8_lossy(&out.stderr);
