@@ -6,6 +6,7 @@
 	let s = $derived(updaterStore.state);
 
 	let title = $derived.by(() => {
+		if (s.phase === 'up_to_date') return 'Up to date';
 		if (s.phase === 'available') return 'Update available';
 		if (s.phase === 'downloading') return 'Downloading update';
 		if (s.phase === 'installing') return 'Installing update';
@@ -27,7 +28,7 @@
 	}
 </script>
 
-{#if s.phase === 'available' || s.phase === 'downloading' || s.phase === 'installing' || s.phase === 'error'}
+{#if s.phase === 'up_to_date' || s.phase === 'available' || s.phase === 'downloading' || s.phase === 'installing' || s.phase === 'error'}
 	<ModalShell
 		{title}
 		titleClass="text-md font-semibold text-emerald-700"
@@ -43,7 +44,9 @@
 		{/snippet}
 
 		<div class="px-5 py-4">
-			{#if s.phase === 'available'}
+			{#if s.phase === 'up_to_date'}
+				<p class="text-xs text-neutral-1000">You're running the latest version.</p>
+			{:else if s.phase === 'available'}
 				<p class="mb-2 text-xs text-neutral-1000">
 					A new version is ready to install. Your work will be saved before restarting.
 				</p>
@@ -65,7 +68,11 @@
 		</div>
 
 		{#snippet footer()}
-			{#if s.phase === 'available'}
+			{#if s.phase === 'up_to_date'}
+				<button type="button" class="button-main primary rounded-lg" onclick={dismiss}>
+					OK
+				</button>
+			{:else if s.phase === 'available'}
 				<button type="button" class="button-main primary rounded-lg" onclick={onSkip}>
 					Skip this version
 				</button>

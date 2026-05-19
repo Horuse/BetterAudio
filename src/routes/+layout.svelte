@@ -42,7 +42,7 @@
 		loadAppInfo().catch(() => {});
 		audioStore.init().catch(() => {});
 		pipelineStore.refresh().catch(() => {});
-		checkForUpdates().catch(() => {});
+		checkForUpdates(true).catch(() => {});
 		listen<string>('menu://action', (e) => handleMenu(e.payload))
 			.then((fn) => { unlistenMenu = fn; })
 			.catch(() => {});

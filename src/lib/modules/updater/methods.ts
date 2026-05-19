@@ -24,17 +24,17 @@ export async function skipVersion(version: string): Promise<void> {
 	updaterStore.state = { phase: 'idle' };
 }
 
-export async function checkForUpdates(): Promise<void> {
+export async function checkForUpdates(silent = false): Promise<void> {
 	updaterStore.state = { phase: 'checking' };
 	try {
 		const update = await check();
 		if (!update) {
-			updaterStore.state = { phase: 'idle' };
+			updaterStore.state = silent ? { phase: 'idle' } : { phase: 'up_to_date' };
 			return;
 		}
 		const skipped = await getSkippedVersion();
 		if (skipped === update.version) {
-			updaterStore.state = { phase: 'idle' };
+			updaterStore.state = silent ? { phase: 'idle' } : { phase: 'up_to_date' };
 			return;
 		}
 		updaterStore.state = { phase: 'available', update };
