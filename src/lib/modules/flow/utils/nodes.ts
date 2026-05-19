@@ -73,7 +73,7 @@ export const registry: Record<NodeKind, NodeRegistryEntry> = {
 		label: 'Audio File',
 		description: 'Play a WAV file as a source. With no live inputs the pipeline runs faster than real time.',
 		component: AudioFile,
-		defaultData: { filePath: null, loopEnabled: false, volume: 1 }
+		defaultData: { filePath: null, loopEnabled: false, volume: 1, autoStart: true }
 	}),
 	speaker: entry<'speaker'>({
 		kind: 'speaker',

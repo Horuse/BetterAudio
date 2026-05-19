@@ -338,7 +338,7 @@
 			{basename(data.filePath)}
 		</div>
 		<div class="flex gap-1">
-			<button class="button-main primary nodrag nopan flex-1 py-1 text-xs" onclick={chooseFile}>
+			<button class="button-main primary rounded-lg nodrag nopan flex-1 py-1 text-xs" onclick={chooseFile}>
 				Choose file…
 			</button>
 			<button

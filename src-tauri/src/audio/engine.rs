@@ -51,6 +51,12 @@ pub enum Command {
         enabled: bool,
         reply: Sender<AppResult<()>>,
     },
+    /// Pause or resume an audio-file input. Silent no-op when not an AudioFile.
+    SetAudioFilePaused {
+        node_id: String,
+        paused: bool,
+        reply: Sender<AppResult<()>>,
+    },
     /// Live volume update for an input node. Silent no-op when not running.
     SetInputVolume {
         node_id: String,
@@ -136,6 +142,16 @@ pub fn run(rx: Receiver<Command>) {
             } => {
                 if let Some(p) = &active {
                     p.set_audio_file_loop(&node_id, enabled);
+                }
+                let _ = reply.send(Ok(()));
+            }
+            Command::SetAudioFilePaused {
+                node_id,
+                paused,
+                reply,
+            } => {
+                if let Some(p) = &active {
+                    p.set_audio_file_paused(&node_id, paused);
                 }
                 let _ = reply.send(Ok(()));
             }

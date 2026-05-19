@@ -127,6 +127,8 @@ pub struct AudioFileData {
     pub loop_enabled: bool,
     #[serde(default = "default_one")]
     pub volume: f32,
+    #[serde(default = "default_true")]
+    pub auto_start: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize, TS)]
@@ -400,6 +402,7 @@ pub struct ValidInput {
     pub id: String,
     pub spec: InputSpec,
     pub volume: f32,
+    pub auto_start: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -550,7 +553,7 @@ impl GraphSpec {
             if n.kind.category() != NodeCategory::Input || !keep.contains(n.id.as_str()) {
                 continue;
             }
-            let (spec, volume) = match n.kind {
+            let (spec, volume, auto_start) = match n.kind {
                 NodeKind::Microphone => {
                     let data: MicrophoneData = parse(&n.data, "Microphone")?;
                     let spec = InputSpec::Microphone {
@@ -558,14 +561,14 @@ impl GraphSpec {
                             .device_id
                             .ok_or_else(|| miss(&n.id, "Microphone has no device selected"))?,
                     };
-                    (spec, 1.0f32)
+                    (spec, 1.0f32, true)
                 }
                 NodeKind::SystemAudio => {
                     let data: SystemAudioData = parse(&n.data, "SystemAudio")?;
                     let spec = InputSpec::SystemAudio {
                         exclude_current_app: data.exclude_current_app,
                     };
-                    (spec, data.volume)
+                    (spec, data.volume, true)
                 }
                 NodeKind::AppAudio => {
                     let data: AppAudioData = parse(&n.data, "AppAudio")?;
@@ -574,7 +577,7 @@ impl GraphSpec {
                             .bundle_id
                             .ok_or_else(|| miss(&n.id, "App Audio has no application selected"))?,
                     };
-                    (spec, data.volume)
+                    (spec, data.volume, true)
                 }
                 NodeKind::AudioFile => {
                     let data: AudioFileData = parse(&n.data, "AudioFile")?;
@@ -583,7 +586,7 @@ impl GraphSpec {
                             .file_path
                             .ok_or_else(|| miss(&n.id, "Audio File has no file selected"))?,
                     };
-                    (spec, data.volume)
+                    (spec, data.volume, data.auto_start)
                 }
                 _ => unreachable!(),
             };
@@ -591,6 +594,7 @@ impl GraphSpec {
                 id: n.id.clone(),
                 spec,
                 volume,
+                auto_start,
             });
         }
         Ok(result)

@@ -162,13 +162,19 @@ impl BroadcastRx {
     /// sleeps `backoff` and retries until each consumer drains enough room.
     /// NOT RT-safe; for offline / file-driven inputs where the consumer
     /// pace dictates source throughput.
-    pub fn broadcast_blocking(&mut self, samples: &[f32], stop: &AtomicBool, backoff: Duration) {
+    pub fn broadcast_blocking(
+        &mut self,
+        samples: &[f32],
+        stop: &AtomicBool,
+        paused: &AtomicBool,
+        backoff: Duration,
+    ) {
         self.apply_commands();
         for slot in self.slots.iter_mut() {
             let Some(p) = slot else { continue };
             let mut written = 0;
             while written < samples.len() {
-                if stop.load(Ordering::SeqCst) {
+                if stop.load(Ordering::SeqCst) || paused.load(Ordering::SeqCst) {
                     return;
                 }
                 let avail = p.slots();

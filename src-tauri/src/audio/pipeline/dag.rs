@@ -1,5 +1,5 @@
 use std::collections::{HashMap, HashSet};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -7,8 +7,8 @@ use rtrb::{Consumer, Producer, RingBuffer};
 use tracing::{info, warn};
 
 use crate::audio::effects::{
-    instantiate_effect, EffectControl, EffectRegistry, GrHandle, LufsHandle, MeterHandle,
-    WaveformHandle, RuntimeEffect,
+    instantiate_effect, update_meter, EffectControl, EffectRegistry, GrHandle, LufsHandle,
+    MeterHandle, WaveformHandle, RuntimeEffect,
 };
 use crate::audio::graph::{EdgeKind, ValidGraph};
 use crate::audio::resample::StereoResampler;
@@ -64,6 +64,12 @@ impl StagingRing {
         self.dropped
     }
 
+    fn clear(&mut self) {
+        self.head = 0;
+        self.tail = 0;
+        self.len = 0;
+    }
+
     fn pop_into(&mut self, dst: &mut [f32]) -> usize {
         let n = dst.len().min(self.len);
         let cap = self.buf.len();
@@ -113,30 +119,24 @@ impl DagNode {
 }
 
 struct SourceState {
-    /// Human-friendly id used only in the one-shot startup log.
     label: String,
     consumer: Consumer<f32>,
-    /// `None` when input SR == output SR.
     resampler: Option<StereoResampler>,
-    /// Samples pulled from the ring waiting to feed the resampler.
     input_staging: Vec<f32>,
-    /// Resampled samples waiting to be drained into `out_buf`.
     out_pending: StagingRing,
-    /// Per-block scratch -- receives one resampler chunk before going into staging.
     chunk_tmp: Vec<f32>,
-    /// Current block (length = DSP_BLOCK_FRAMES * 2).
     out_buf: Vec<f32>,
-    /// Input-side (raw input-SR, stereo) sample count needed to produce one
-    /// full output block. Used by the availability-pacing worker to know when
-    /// this source has enough buffered audio to safely contribute a block.
     input_samples_per_block: usize,
-    /// Wall-time of the most recent successful pop. Used to detect "silent"
-    /// sources -- if no samples have flowed for `STALL_THRESHOLD`, the worker
-    /// stops waiting on this source so the OTHER sources don't end up with
-    /// their rings overflowing while we hang on a dead one.
+    /// >STALL_THRESHOLD since last pop => zero-fill and stop waiting on this source.
     last_pop_at: Instant,
-    /// One-shot startup log so we can confirm samples actually start flowing.
     first_data_logged: bool,
+    volume: Arc<AtomicU32>,
+    paused: Option<Arc<AtomicBool>>,
+    // u64 generation (not AtomicBool) so every output's SourceState detects the
+    // seek independently; swap(false) would clear the flag for the first reader.
+    drain: Option<Arc<AtomicU64>>,
+    last_drain_gen: u64,
+    meter: Option<MeterHandle>,
 }
 
 impl SourceState {
@@ -149,6 +149,11 @@ impl SourceState {
     /// A stalled source contributes silence to the mix (fill_block zero-fills
     /// the part it can't supply).
     fn is_ready_for_block(&self) -> bool {
+        if let Some(p) = &self.paused {
+            if p.load(Ordering::SeqCst) {
+                return true;
+            }
+        }
         if self.is_stalled() {
             return true;
         }
@@ -157,6 +162,36 @@ impl SourceState {
     }
 
     fn fill_block(&mut self) {
+        if let Some(p) = &self.paused {
+            if p.load(Ordering::SeqCst) {
+                let avail = self.consumer.slots();
+                if avail > 0 {
+                    if let Ok(chunk) = self.consumer.read_chunk(avail) {
+                        chunk.commit_all();
+                    }
+                }
+                self.input_staging.clear();
+                self.out_pending.clear();
+                self.out_buf.fill(0.0);
+                return;
+            }
+        }
+        if let Some(d) = &self.drain {
+            let gen = d.load(Ordering::SeqCst);
+            if gen != self.last_drain_gen {
+                self.last_drain_gen = gen;
+                let avail = self.consumer.slots();
+                if avail > 0 {
+                    if let Ok(chunk) = self.consumer.read_chunk(avail) {
+                        chunk.commit_all();
+                    }
+                }
+                self.input_staging.clear();
+                self.out_pending.clear();
+                self.out_buf.fill(0.0);
+                return;
+            }
+        }
         let need = self.out_buf.len();
         let mut written = self.out_pending.pop_into(&mut self.out_buf[..]);
         while written < need {
@@ -166,10 +201,21 @@ impl SourceState {
                 for s in &mut self.out_buf[written..] {
                     *s = 0.0;
                 }
-                return;
+                break;
             }
             let n = self.out_pending.pop_into(&mut self.out_buf[written..]);
             written += n;
+        }
+        const ONE_BITS: u32 = 0x3F80_0000;
+        let vol_bits = self.volume.load(Ordering::Relaxed);
+        if vol_bits != ONE_BITS {
+            let vol = f32::from_bits(vol_bits);
+            for s in self.out_buf.iter_mut() {
+                *s *= vol;
+            }
+        }
+        if let Some(m) = &self.meter {
+            update_meter(m, &self.out_buf);
         }
     }
 
@@ -400,6 +446,10 @@ pub(super) fn build_output_graph(
     input_native_sr: &HashMap<String, u32>,
     producer_pairs: &mut Vec<(String, Producer<f32>)>,
     registry: &mut EffectRegistry,
+    input_volumes: &HashMap<String, Arc<AtomicU32>>,
+    input_paused: &HashMap<String, Arc<AtomicBool>>,
+    input_drain: &HashMap<String, Arc<AtomicU64>>,
+    input_meters: &HashMap<String, MeterHandle>,
 ) -> AppResult<BuiltOutputGraph> {
     let reachable: HashSet<String> = match output_id {
         Some(id) => reachable_backward(id, valid),
@@ -494,6 +544,14 @@ pub(super) fn build_output_graph(
                 input_samples_per_block,
                 last_pop_at: Instant::now(),
                 first_data_logged: false,
+                volume: input_volumes
+                    .get(id)
+                    .cloned()
+                    .unwrap_or_else(|| Arc::new(AtomicU32::new(1.0f32.to_bits()))),
+                paused: input_paused.get(id).cloned(),
+                drain: input_drain.get(id).cloned(),
+                last_drain_gen: 0,
+                meter: input_meters.get(id).cloned(),
             };
             id_to_index.insert(id.clone(), nodes.len());
             nodes.push(DagNode::Source(source));

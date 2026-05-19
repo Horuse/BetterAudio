@@ -12,12 +12,11 @@ use std::cell::UnsafeCell;
 use std::ffi::{c_void, CString};
 use std::mem::ManuallyDrop;
 use std::os::raw::c_char;
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use tracing::{info, warn};
 
-use crate::audio::effects::{update_meter, MeterHandle};
 use crate::audio::input_bridge::BroadcastRx;
 use crate::error::{AppError, AppResult};
 
@@ -102,10 +101,6 @@ struct CallbackState {
     /// `UnsafeCell` (not `Mutex`) — SCK serial queue is the only mutator;
     /// avoids the kernel call `Mutex::lock` can take under priority inversion.
     bridge: UnsafeCell<BroadcastRx>,
-    meter: Option<MeterHandle>,
-    volume: Arc<AtomicU32>,
-    /// Pre-allocated scratch for in-callback volume scaling (avoids RT allocs).
-    staging: UnsafeCell<Box<[f32]>>,
     first_call_logged: AtomicBool,
     shutting_down: AtomicBool,
 }
@@ -143,26 +138,7 @@ extern "C" fn sample_trampoline(
     bridge.apply_commands();
     let n = (frames as usize) * (channels as usize);
     let slice = unsafe { std::slice::from_raw_parts(samples, n) };
-    const ONE_BITS: u32 = 0x3F80_0000;
-    let vol_bits = state.volume.load(Ordering::Relaxed);
-    let effective: &[f32] = if vol_bits != ONE_BITS {
-        let vol = f32::from_bits(vol_bits);
-        let staging = unsafe { &mut *state.staging.get() };
-        if n <= staging.len() {
-            for (dst, &src) in staging[..n].iter_mut().zip(slice) {
-                *dst = src * vol;
-            }
-            &staging[..n]
-        } else {
-            slice
-        }
-    } else {
-        slice
-    };
-    if let Some(m) = &state.meter {
-        update_meter(m, effective);
-    }
-    bridge.broadcast(effective);
+    bridge.broadcast(slice);
 }
 
 impl SckCapture {
@@ -171,8 +147,6 @@ impl SckCapture {
         sample_rate: u32,
         channels: u32,
         bridge: BroadcastRx,
-        meter: Option<MeterHandle>,
-        volume: Arc<AtomicU32>,
     ) -> AppResult<Self> {
         let handle = unsafe { ba_sck_create() };
         if handle.is_null() {
@@ -182,9 +156,6 @@ impl SckCapture {
         let state = Arc::new(CallbackState {
             label: format!("app:{bundle_id}"),
             bridge: UnsafeCell::new(bridge),
-            meter,
-            volume,
-            staging: UnsafeCell::new(vec![0.0f32; 16_384].into_boxed_slice()),
             first_call_logged: AtomicBool::new(false),
             shutting_down: AtomicBool::new(false),
         });
@@ -215,14 +186,12 @@ impl SckCapture {
 
     /// Start capturing system-wide audio. When `exclude_current_app` is true,
     /// our own process's audio is omitted from the mix (prevents feedback loops
-    /// when System Audio → speaker is wired through Splitwave itself).
+    /// when System Audio is wired through Splitwave itself).
     pub fn start_system(
         exclude_current_app: bool,
         sample_rate: u32,
         channels: u32,
         bridge: BroadcastRx,
-        meter: Option<MeterHandle>,
-        volume: Arc<AtomicU32>,
     ) -> AppResult<Self> {
         let handle = unsafe { ba_sck_create() };
         if handle.is_null() {
@@ -232,9 +201,6 @@ impl SckCapture {
         let state = Arc::new(CallbackState {
             label: "system".to_string(),
             bridge: UnsafeCell::new(bridge),
-            meter,
-            volume,
-            staging: UnsafeCell::new(vec![0.0f32; 16_384].into_boxed_slice()),
             first_call_logged: AtomicBool::new(false),
             shutting_down: AtomicBool::new(false),
         });

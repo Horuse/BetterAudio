@@ -74,6 +74,10 @@
         @variant hover {
             @apply border-neutral-500 bg-neutral-300 text-neutral-1100;
         }
+
+        &.active {
+            @apply bg-neutral-600 text-theme border-neutral-800
+        }
     }
 
     .button-main.secondary {

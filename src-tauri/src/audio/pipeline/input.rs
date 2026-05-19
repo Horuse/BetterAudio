@@ -1,5 +1,5 @@
 use std::path::PathBuf;
-use std::sync::atomic::AtomicU32;
+use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
 use serde_json::json;
@@ -7,7 +7,6 @@ use tauri::{AppHandle, Emitter};
 use tracing::info;
 
 use crate::audio::device::{self, DeviceKind};
-use crate::audio::effects::MeterHandle;
 use crate::audio::graph::{InputSpec, ValidInput};
 use crate::audio::input_bridge::BroadcastRx;
 use crate::audio::streams;
@@ -106,8 +105,7 @@ pub(super) fn start_input_stream(
     node_id: &str,
     resolved: ResolvedInput,
     bridge: BroadcastRx,
-    meter: MeterHandle,
-    volume: Arc<AtomicU32>,
+    paused: Option<Arc<AtomicBool>>,
     app: &AppHandle,
 ) -> AppResult<InputHandle> {
     let app_err = app.clone();
@@ -132,7 +130,7 @@ pub(super) fn start_input_stream(
                 sample_format,
                 src_channels,
                 bridge,
-                Some(meter),
+                None,
                 err_cb,
             )?;
             Ok(InputHandle::Cpal(stream))
@@ -151,8 +149,6 @@ pub(super) fn start_input_stream(
                 sample_rate,
                 SCK_CHANNELS as u32,
                 bridge,
-                Some(meter),
-                volume,
             )?;
             Ok(InputHandle::Sck(capture))
         }
@@ -167,15 +163,12 @@ pub(super) fn start_input_stream(
                 sample_rate,
                 SCK_CHANNELS as u32,
                 bridge,
-                Some(meter),
-                volume,
             )?;
             Ok(InputHandle::Sck(capture))
         }
         #[cfg(not(target_os = "macos"))]
         ResolvedInput::SystemAudio { .. } | ResolvedInput::AppAudio { .. } => {
             drop(bridge);
-            let _ = meter;
             Err(AppError::Stream(
                 "System/App Audio capture is only supported on macOS".into(),
             ))
@@ -183,13 +176,13 @@ pub(super) fn start_input_stream(
         ResolvedInput::AudioFile { path, .. } => {
             // Loop is a runtime atomic, not in InputSpec; frontend syncs it
             // via `set_audio_file_loop` after pipeline start.
+            let paused_arc = paused.unwrap_or_else(|| Arc::new(AtomicBool::new(false)));
             let reader = start_audio_file_reader(
                 node_id.to_string(),
                 path,
                 bridge,
-                meter,
                 false,
-                volume,
+                paused_arc,
                 app.clone(),
             )?;
             Ok(InputHandle::AudioFile(reader))

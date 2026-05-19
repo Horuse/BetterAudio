@@ -13,7 +13,7 @@
 //!   in the validator.
 
 use std::collections::{HashMap, HashSet};
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 
 use rtrb::Producer;
@@ -74,13 +74,13 @@ pub struct ActivePipeline {
 }
 
 struct InputState {
-    /// Held only for its `Drop` -- cpal stream stop / SCK destroy.
     _handle: InputHandle,
     sample_rate: u32,
     bridge_tx: BroadcastTx,
-    /// output_id (or `MONITOR_KEY`) -> slot indices in `bridge_tx`.
     bridges_by_output: HashMap<String, Vec<usize>>,
     volume: Arc<AtomicU32>,
+    paused: Option<Arc<AtomicBool>>,
+    drain: Option<Arc<AtomicU64>>,
 }
 
 struct SpeakerState {
@@ -185,6 +185,9 @@ impl ActivePipeline {
             if let InputHandle::AudioFile(reader) = &state._handle {
                 reader.seek_to().store(frame.max(0), Ordering::SeqCst);
             }
+            if let Some(d) = &state.drain {
+                d.fetch_add(1, Ordering::SeqCst);
+            }
         }
     }
 
@@ -195,6 +198,14 @@ impl ActivePipeline {
         if let Some(state) = self.inputs.get(node_id) {
             if let InputHandle::AudioFile(reader) = &state._handle {
                 reader.loop_enabled().store(enabled, Ordering::SeqCst);
+            }
+        }
+    }
+
+    pub fn set_audio_file_paused(&self, node_id: &str, paused: bool) {
+        if let Some(state) = self.inputs.get(node_id) {
+            if let Some(p) = &state.paused {
+                p.store(paused, Ordering::SeqCst);
             }
         }
     }
@@ -445,6 +456,51 @@ impl ActivePipeline {
             }
         }
 
+        // Pre-create control atomics for new inputs so they can be wired into
+        // the output DAG source nodes before InputState is constructed.
+        let mut new_input_volumes: HashMap<String, Arc<AtomicU32>> = HashMap::new();
+        let mut new_input_paused: HashMap<String, Arc<AtomicBool>> = HashMap::new();
+        let mut new_input_drain: HashMap<String, Arc<AtomicU64>> = HashMap::new();
+        let mut new_input_meters: HashMap<String, MeterHandle> = HashMap::new();
+        for inp in &graph.inputs {
+            if !self.inputs.contains_key(&inp.id) {
+                new_input_volumes.insert(inp.id.clone(), Arc::new(AtomicU32::new(inp.volume.to_bits())));
+                new_input_meters.insert(inp.id.clone(), MeterHandle::new(inp.id.clone()));
+                if matches!(&inp.spec, InputSpec::AudioFile { .. }) {
+                    new_input_paused.insert(inp.id.clone(), Arc::new(AtomicBool::new(!inp.auto_start)));
+                    new_input_drain.insert(inp.id.clone(), Arc::new(AtomicU64::new(0)));
+                }
+            }
+        }
+        let mut input_volumes: HashMap<String, Arc<AtomicU32>> = HashMap::new();
+        let mut input_paused: HashMap<String, Arc<AtomicBool>> = HashMap::new();
+        let mut input_drain: HashMap<String, Arc<AtomicU64>> = HashMap::new();
+        let mut input_meters: HashMap<String, MeterHandle> = HashMap::new();
+        for (id, state) in &self.inputs {
+            input_volumes.insert(id.clone(), state.volume.clone());
+            if let Some(p) = &state.paused {
+                input_paused.insert(id.clone(), p.clone());
+            }
+            if let Some(d) = &state.drain {
+                input_drain.insert(id.clone(), d.clone());
+            }
+            if let Some(m) = self.meters.get(id) {
+                input_meters.insert(id.clone(), m.clone());
+            }
+        }
+        for (id, vol) in &new_input_volumes {
+            input_volumes.insert(id.clone(), vol.clone());
+        }
+        for (id, p) in &new_input_paused {
+            input_paused.insert(id.clone(), p.clone());
+        }
+        for (id, d) in &new_input_drain {
+            input_drain.insert(id.clone(), d.clone());
+        }
+        for (id, m) in &new_input_meters {
+            input_meters.insert(id.clone(), m.clone());
+        }
+
         // Skip Full survivors; everything else needs a fresh sub-graph
         // (the new `OutputGraph` ships to GraphSwap workers via
         // `ctrl.send_graph`, or boots a new worker for Fresh starts).
@@ -489,6 +545,10 @@ impl ActivePipeline {
                 &input_native_sr,
                 &mut my_pairs,
                 &mut self.effect_registry,
+                &input_volumes,
+                &input_paused,
+                &input_drain,
+                &input_meters,
             )?;
             for (inp_id, prod) in my_pairs {
                 all_pairs.push((out.id.clone(), inp_id, prod));
@@ -531,6 +591,10 @@ impl ActivePipeline {
                     &input_native_sr,
                     &mut my_pairs,
                     &mut self.effect_registry,
+                    &input_volumes,
+                    &input_paused,
+                    &input_drain,
+                    &input_meters,
                 )?;
                 for (inp_id, prod) in my_pairs {
                     all_pairs.push((MONITOR_KEY.to_string(), inp_id, prod));
@@ -571,20 +635,22 @@ impl ActivePipeline {
                     AppError::Validation(format!("input runtime missing for {input_id}"))
                 })?;
                 let sample_rate = resolved.sample_rate();
-                let meter = MeterHandle::new(input_id.clone());
-                self.meters.insert(input_id.clone(), meter.clone());
+                let meter = new_input_meters.remove(&input_id)
+                    .unwrap_or_else(|| MeterHandle::new(input_id.clone()));
+                self.meters.insert(input_id.clone(), meter);
 
-                let init_vol = graph.inputs.iter()
-                    .find(|i| i.id == input_id)
-                    .map_or(1.0f32, |i| i.volume);
-                let volume = Arc::new(AtomicU32::new(init_vol.to_bits()));
+                let volume = new_input_volumes
+                    .remove(&input_id)
+                    .unwrap_or_else(|| Arc::new(AtomicU32::new(1.0f32.to_bits())));
+                let paused = new_input_paused.remove(&input_id);
+                let drain = new_input_drain.remove(&input_id);
                 let (mut bridge_tx, bridge_rx) = broadcast_channel();
                 let mut bridges_by_output: HashMap<String, Vec<usize>> = HashMap::new();
                 for (out_id, prod) in tagged {
                     let slot = bridge_tx.add(prod)?;
                     bridges_by_output.entry(out_id).or_default().push(slot);
                 }
-                let handle = start_input_stream(&input_id, resolved, bridge_rx, meter, volume.clone(), &app)?;
+                let handle = start_input_stream(&input_id, resolved, bridge_rx, paused.clone(), &app)?;
                 self.inputs.insert(
                     input_id,
                     InputState {
@@ -593,6 +659,8 @@ impl ActivePipeline {
                         bridge_tx,
                         bridges_by_output,
                         volume,
+                        paused,
+                        drain,
                     },
                 );
             }

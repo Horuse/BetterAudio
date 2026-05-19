@@ -8,7 +8,7 @@
 	import { methods as audioMethods } from '$lib/modules/audio/methods';
 	import Wrapper from '../node.svelte';
 	import Slider from '../effect/_slider.svelte';
-	import { Rewind, Loop } from '$lib/components/icons';
+	import { Loop, Pause, Play, SkipBack5, SkipForward5, Stop } from '$lib/components/icons';
 	import { onNodeAction } from '$lib/modules/flow/utils';
 
 	type AudioFileNodeType = Node<AudioFileNodeData, 'audioFile'>;
@@ -22,12 +22,14 @@
 		totalFrames: number;
 		sampleRate: number;
 		stopped: boolean;
+		paused: boolean;
 	}
 
 	let frames = $state(0);
 	let totalFrames = $state(0);
 	let sampleRate = $state(0);
 	let playing = $state(false);
+	let paused = $state(false);
 
 	let unlisten: UnlistenFn | undefined;
 	let unlistenChoose: (() => void) | undefined;
@@ -41,13 +43,15 @@
 			frames = p.frames;
 			totalFrames = p.totalFrames;
 			sampleRate = p.sampleRate;
-			playing = !p.stopped;
+			paused = p.paused;
+			playing = !p.stopped && !p.paused;
 		});
 	});
 
 	$effect(() => {
 		if (!audioStore.isRunning) {
 			playing = false;
+			paused = false;
 		}
 	});
 
@@ -77,13 +81,47 @@
 		}
 	}
 
-	function rewind() {
+	function togglePlayPause() {
 		if (!audioStore.isRunning) return;
+		if (paused || !playing) {
+			paused = false;
+			playing = true;
+			audioMethods.setAudioFilePaused(id, false).catch(() => {});
+		} else {
+			paused = true;
+			playing = false;
+			audioMethods.setAudioFilePaused(id, true).catch(() => {});
+		}
+	}
+
+	function stop() {
+		if (!audioStore.isRunning) return;
+		paused = true;
+		playing = false;
 		audioMethods.seekAudioFile(id, 0).catch(() => {});
+		audioMethods.setAudioFilePaused(id, true).catch(() => {});
+	}
+
+	function skipBack() {
+		if (!audioStore.isRunning || !data.filePath) return;
+		const target = Math.max(0, frames - 5 * sampleRate);
+		frames = target;
+		audioMethods.seekAudioFile(id, target).catch(() => {});
+	}
+
+	function skipForward() {
+		if (!audioStore.isRunning || !data.filePath) return;
+		const target = Math.min(totalFrames, frames + 5 * sampleRate);
+		frames = target;
+		audioMethods.seekAudioFile(id, target).catch(() => {});
 	}
 
 	function toggleLoop() {
 		flow.updateNodeData(id, { loopEnabled: !data.loopEnabled });
+	}
+
+	function toggleAutoStart() {
+		flow.updateNodeData(id, { autoStart: !data.autoStart });
 	}
 
 	function onScrub(e: Event) {
@@ -111,6 +149,7 @@
 
 	let currentSec = $derived(sampleRate > 0 ? frames / sampleRate : 0);
 	let totalSec = $derived(sampleRate > 0 ? totalFrames / sampleRate : 0);
+	let canControl = $derived(audioStore.isRunning && !!data.filePath);
 
 	function setVolume(pct: number) {
 		const scalar = Math.max(0, Math.min(1, pct / 100));
@@ -134,37 +173,24 @@
 			{basename(data.filePath)}
 		</div>
 
-		<div class="flex gap-1">
-			<button class="button-main primary nodrag nopan flex-1 py-1 text-xs" onclick={chooseFile}>
+		<div class="flex items-center gap-1">
+			<button class="button-main primary rounded-lg nodrag nopan flex-1 py-1 text-xs" onclick={chooseFile}>
 				Choose file...
 			</button>
-			<button
-				type="button"
-				class="nodrag nopan flex h-7 w-7 shrink-0 items-center justify-center rounded border border-neutral-400 bg-neutral-100 text-neutral-900 hover:bg-neutral-200 disabled:opacity-40"
-				title="Rewind to start"
-				disabled={!audioStore.isRunning || !data.filePath}
-				onclick={rewind}
-			>
-				<Rewind class="h-3.5 w-3.5" />
-			</button>
-			<button
-				type="button"
-				class={[
-					'nodrag nopan flex h-7 w-7 shrink-0 items-center justify-center rounded border text-xs transition-colors',
-					data.loopEnabled
-						? 'border-neutral-900 bg-neutral-900 text-white'
-						: 'border-neutral-400 bg-neutral-100 text-neutral-900 hover:bg-neutral-200'
-				]}
-				title={data.loopEnabled ? 'Loop on' : 'Loop off'}
-				onclick={toggleLoop}
-			>
-				<Loop class="h-3.5 w-3.5" />
-			</button>
+			<label class="nodrag nopan flex cursor-pointer select-none items-center gap-1 text-xs text-neutral-700">
+				<input
+					type="checkbox"
+					class="accent-neutral-900"
+					checked={data.autoStart ?? true}
+					onchange={toggleAutoStart}
+				/>
+				Auto play
+			</label>
 		</div>
 
 		<input
 			type="range"
-			class="nodrag nopan h-1 w-full cursor-pointer accent-neutral-900 disabled:opacity-40"
+			class="nodrag nopan nowheel h-1 w-full cursor-pointer accent-neutral-900 disabled:opacity-40"
 			min="0"
 			max={Math.max(totalFrames, 1)}
 			value={frames}
@@ -172,14 +198,68 @@
 			oninput={onScrub}
 		/>
 
-		<div class="flex items-baseline justify-between font-mono text-[11px]">
-			<span class={playing ? 'text-green-600' : 'text-neutral-900'}>
-				{playing ? '> PLAY' : '||'}
-			</span>
-			<span class="text-neutral-1000 tabular-nums">
-				{formatTime(currentSec)} / {formatTime(totalSec)}
-			</span>
+		<div class="flex items-center justify-between font-mono text-[11px]">
+			<span class="tabular-nums text-neutral-900">{formatTime(currentSec)}</span>
+			<div class="flex items-center justify-center gap-1">
+				<button
+					type="button"
+					class="nodrag nopan button-main primary size-6 p-0 rounded-lg"
+					title="Stop"
+					disabled={!canControl}
+					onclick={stop}
+				>
+					<Stop class="size-3" />
+				</button>
+				<button
+					type="button"
+					class="nodrag nopan button-main primary size-6 p-0 rounded-lg"
+					title="Back 5s"
+					disabled={!canControl}
+					onclick={skipBack}
+				>
+					<SkipBack5 class="size-3" />
+				</button>
+				<button
+					type="button"
+					class="nodrag nopan button-main primary size-6 p-0 rounded-lg"
+					title={playing ? 'Pause' : 'Play'}
+					disabled={!canControl}
+					onclick={togglePlayPause}
+				>
+					{#if playing}
+						<Pause class="size-3" />
+					{:else}
+						<Play class="size-3" />
+					{/if}
+				</button>
+				<button
+					type="button"
+					class="nodrag nopan button-main primary size-6 p-0 rounded-lg"
+					title="Forward 5s"
+					disabled={!canControl}
+					onclick={skipForward}
+				>
+					<SkipForward5 class="size-3" />
+				</button>
+				<button
+					type="button"
+					class={[
+					'nodrag nopan button-main primary size-6 p-0 rounded-lg',
+					data.loopEnabled && 'active'
+				]}
+					title={data.loopEnabled ? 'Loop on' : 'Loop off'}
+					onclick={toggleLoop}
+				>
+					<Loop class="size-3" />
+				</button>
+			</div>
+			<span class="tabular-nums text-neutral-900">{formatTime(totalSec)}</span>
 		</div>
+
+
+
+
+
 		<Slider
 			label="Volume"
 			value={volumePct}

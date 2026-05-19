@@ -1,5 +1,5 @@
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
@@ -9,7 +9,6 @@ use serde_json::json;
 use tauri::{AppHandle, Emitter};
 use tracing::{info, warn};
 
-use crate::audio::effects::{update_meter, MeterHandle};
 use crate::audio::input_bridge::BroadcastRx;
 use crate::error::{AppError, AppResult};
 
@@ -77,9 +76,8 @@ pub(super) fn start_audio_file_reader(
     node_id: String,
     path: PathBuf,
     bridge: BroadcastRx,
-    meter: MeterHandle,
     initial_loop: bool,
-    volume: Arc<AtomicU32>,
+    paused: Arc<AtomicBool>,
     app: AppHandle,
 ) -> AppResult<AudioFileReader> {
     let stop = Arc::new(AtomicBool::new(false));
@@ -88,7 +86,7 @@ pub(super) fn start_audio_file_reader(
     let seek_to_thread = seek_to.clone();
     let loop_enabled = Arc::new(AtomicBool::new(initial_loop));
     let loop_enabled_thread = loop_enabled.clone();
-    let volume_thread = volume.clone();
+    let paused_thread = paused.clone();
 
     let join = thread::Builder::new()
         .name(format!("audio-file:{}", path.display()))
@@ -97,11 +95,10 @@ pub(super) fn start_audio_file_reader(
                 node_id,
                 &path,
                 bridge,
-                meter,
                 &stop_thread,
                 &seek_to_thread,
                 &loop_enabled_thread,
-                &volume_thread,
+                &paused_thread,
                 &app,
             ) {
                 warn!(path = %path.display(), error = %e, "audio file reader failed");
@@ -117,16 +114,14 @@ pub(super) fn start_audio_file_reader(
     })
 }
 
-#[allow(clippy::too_many_arguments)]
 fn run(
     node_id: String,
     path: &PathBuf,
     mut bridge: BroadcastRx,
-    meter: MeterHandle,
     stop: &AtomicBool,
     seek_to: &AtomicI64,
     loop_enabled: &AtomicBool,
-    volume: &AtomicU32,
+    paused: &AtomicBool,
     app: &AppHandle,
 ) -> AppResult<()> {
     let mut reader = hound::WavReader::open(path)
@@ -150,14 +145,35 @@ fn run(
 
     let mut frames_played: u64 = 0;
     let mut last_progress = Instant::now();
-    emit_progress(app, &node_id, frames_played, total_frames, sample_rate, false);
+    emit_progress(app, &node_id, frames_played, total_frames, sample_rate, false, false);
 
     let mut stereo = vec![0.0_f32; CHUNK_FRAMES * 2];
+    let mut last_paused_progress = Instant::now();
+    let mut last_l = 0.0f32;
+    let mut last_r = 0.0f32;
     loop {
         if stop.load(Ordering::SeqCst) {
-            emit_progress(app, &node_id, frames_played, total_frames, sample_rate, true);
+            emit_progress(app, &node_id, frames_played, total_frames, sample_rate, true, false);
             return Ok(());
         }
+
+        if paused.load(Ordering::SeqCst) {
+            // Drain any pending seek while paused so the scrubber works.
+            let pending_seek = seek_to.swap(SEEK_NONE, Ordering::SeqCst);
+            if pending_seek >= 0 {
+                let target = (pending_seek as u64).min(total_frames);
+                if reader.seek(target as u32).is_ok() {
+                    frames_played = target;
+                }
+            }
+            if last_paused_progress.elapsed() >= PROGRESS_INTERVAL {
+                emit_progress(app, &node_id, frames_played, total_frames, sample_rate, false, true);
+                last_paused_progress = Instant::now();
+            }
+            thread::sleep(Duration::from_millis(10));
+            continue;
+        }
+        last_paused_progress = Instant::now();
 
         let pending_seek = seek_to.swap(SEEK_NONE, Ordering::SeqCst);
         if pending_seek >= 0 {
@@ -166,7 +182,7 @@ fn run(
                 warn!(path = %path.display(), target, error = %e, "wav seek failed");
             } else {
                 frames_played = target;
-                emit_progress(app, &node_id, frames_played, total_frames, sample_rate, false);
+                emit_progress(app, &node_id, frames_played, total_frames, sample_rate, false, false);
                 last_progress = Instant::now();
             }
         }
@@ -176,32 +192,39 @@ fn run(
             if loop_enabled.load(Ordering::SeqCst) {
                 if let Err(e) = reader.seek(0) {
                     warn!(path = %path.display(), error = %e, "wav loop seek failed");
-                    emit_progress(app, &node_id, frames_played, total_frames, sample_rate, true);
+                    emit_progress(app, &node_id, frames_played, total_frames, sample_rate, true, false);
                     return Ok(());
                 }
                 frames_played = 0;
                 continue;
             }
+            // Fade out last sample to avoid hard click at end of file.
+            const FADE_FRAMES: usize = 128;
+            let mut fade_buf = [0.0f32; FADE_FRAMES * 2];
+            for f in 0..FADE_FRAMES {
+                let t = 1.0 - (f as f32 + 1.0) / FADE_FRAMES as f32;
+                fade_buf[f * 2] = last_l * t;
+                fade_buf[f * 2 + 1] = last_r * t;
+            }
+            bridge.broadcast_blocking(&fade_buf, stop, paused, BACKOFF_WHEN_FULL);
+            // Self-pause at position 0 so the thread stays alive for Play/seek.
             info!(path = %path.display(), "audio file reached end");
-            emit_progress(app, &node_id, frames_played, total_frames, sample_rate, true);
-            return Ok(());
+            paused.store(true, Ordering::SeqCst);
+            let _ = reader.seek(0);
+            frames_played = 0;
+            emit_progress(app, &node_id, 0, total_frames, sample_rate, false, true);
+            last_progress = Instant::now();
+            continue;
         }
 
         let samples = &mut stereo[..frames_read * 2];
-        const ONE_BITS: u32 = 0x3F80_0000;
-        let vol_bits = volume.load(Ordering::Relaxed);
-        if vol_bits != ONE_BITS {
-            let vol = f32::from_bits(vol_bits);
-            for s in samples.iter_mut() {
-                *s *= vol;
-            }
-        }
-        update_meter(&meter, samples);
-        bridge.broadcast_blocking(samples, stop, BACKOFF_WHEN_FULL);
+        bridge.broadcast_blocking(samples, stop, paused, BACKOFF_WHEN_FULL);
         frames_played += frames_read as u64;
+        last_l = stereo[(frames_read - 1) * 2];
+        last_r = stereo[(frames_read - 1) * 2 + 1];
 
         if last_progress.elapsed() >= PROGRESS_INTERVAL {
-            emit_progress(app, &node_id, frames_played, total_frames, sample_rate, false);
+            emit_progress(app, &node_id, frames_played, total_frames, sample_rate, false, false);
             last_progress = Instant::now();
         }
     }
@@ -214,6 +237,7 @@ fn emit_progress(
     total_frames: u64,
     sample_rate: u32,
     stopped: bool,
+    paused: bool,
 ) {
     let _ = app.emit(
         PROGRESS_EVENT,
@@ -223,6 +247,7 @@ fn emit_progress(
             "totalFrames": total_frames,
             "sampleRate": sample_rate,
             "stopped": stopped,
+            "paused": paused,
         }),
     );
 }
